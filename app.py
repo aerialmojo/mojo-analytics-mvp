@@ -65,15 +65,30 @@ with left:
 with right:
     st.markdown("### 📊 Player Value Overview")
 
-    st.dataframe(
-        df[["Player", "Position", "Salary", "PPG_3", "PPG_Season", "Value_per_$1k"]],
-        use_container_width=True,
-        hide_index=True
+    value_col = "Value_per_$1k"
+
+    def color_value(val: float) -> str:
+        q1 = df[value_col].quantile(0.25)
+        q3 = df[value_col].quantile(0.75)
+        if val >= q3:
+            return "background-color: rgba(0, 200, 0, 0.20)"   # green
+        if val <= q1:
+            return "background-color: rgba(255, 0, 0, 0.18)"   # red
+        return "background-color: rgba(255, 215, 0, 0.18)"     # yellow
+
+    table_df = df[["Player", "Position", "Salary", "PPG_3", "PPG_Season", value_col]].copy()
+
+    styled = (
+        table_df.style
+        .format({
+            "Salary": "${:,.0f}",
+            "PPG_3": "{:.1f}",
+            "PPG_Season": "{:.1f}",
+            value_col: "{:.2f}",
+        })
+        .applymap(color_value, subset=[value_col])
     )
 
-    st.caption(
-        "Value per $1k = Season PPG ÷ (Salary / 1000). "
-        "Higher values indicate more fantasy production per dollar."
-    )
+    st.dataframe(styled, use_container_width=True, hide_index=True)
 
-    st.button("🤖 Explain Value (Coming Soon)")
+    st.markdown("**Legend:** 🟩 High value • 🟨 Medium • 🟥 Low (based on this slate)")
