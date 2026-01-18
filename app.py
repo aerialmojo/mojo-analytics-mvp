@@ -50,8 +50,8 @@ with left:
     st.markdown("### 🧩 Roster Builder (DraftKings-style Demo)")
     salary_cap = 50000
     total_salary = 0
+    chosen_players = []
 
-    # DraftKings NFL roster slots
     slots = [
         ("QB", ["QB"]),
         ("RB1", ["RB"]),
@@ -64,19 +64,19 @@ with left:
         ("DST", ["DST"]),
     ]
 
-    chosen_players = []
+    c1, c2 = st.columns(2)
 
-    for slot_name, allowed_positions in slots:
+    for i, (slot_name, allowed_positions) in enumerate(slots):
         slot_options = df[df["Position"].isin(allowed_positions)]["Player"].tolist()
-
-        # Optional: prevent duplicates by removing already selected players
         slot_options = [p for p in slot_options if p not in chosen_players]
 
-        selection = st.selectbox(
-            f"{slot_name}",
-            ["—"] + slot_options,
-            key=f"slot_{slot_name}"
-        )
+        target_col = c1 if i % 2 == 0 else c2
+        with target_col:
+            selection = st.selectbox(
+                slot_name,
+                ["—"] + slot_options,
+                key=f"slot_{slot_name}"
+            )
 
         if selection != "—":
             chosen_players.append(selection)
