@@ -47,28 +47,47 @@ left, right = st.columns([1, 2])
 # Roster Builder (Left)
 # -----------------------------
 with left:
-    st.markdown("### 🧩 Roster Builder (Demo)")
+    st.markdown("### 🧩 Roster Builder (DraftKings-style Demo)")
     salary_cap = 50000
     total_salary = 0
 
-    roster_slots = {
-        "QB": None,
-        "RB": None,
-        "WR": None,
-        "FLEX": None,
-    }
+    # DraftKings NFL roster slots
+    slots = [
+        ("QB", ["QB"]),
+        ("RB1", ["RB"]),
+        ("RB2", ["RB"]),
+        ("WR1", ["WR"]),
+        ("WR2", ["WR"]),
+        ("WR3", ["WR"]),
+        ("TE", ["TE"]),
+        ("FLEX", ["RB", "WR", "TE"]),
+        ("DST", ["DST"]),
+    ]
 
-    for pos in roster_slots:
-        options = df[df["Position"].isin([pos, "RB", "WR"]) if pos == "FLEX" else df["Position"] == pos]["Player"]
-        selection = st.selectbox(f"{pos}", ["—"] + list(options), key=pos)
+    chosen_players = []
+
+    for slot_name, allowed_positions in slots:
+        slot_options = df[df["Position"].isin(allowed_positions)]["Player"].tolist()
+
+        # Optional: prevent duplicates by removing already selected players
+        slot_options = [p for p in slot_options if p not in chosen_players]
+
+        selection = st.selectbox(
+            f"{slot_name}",
+            ["—"] + slot_options,
+            key=f"slot_{slot_name}"
+        )
 
         if selection != "—":
-            player_salary = df[df["Player"] == selection]["Salary"].iloc[0]
-            total_salary += player_salary
+            chosen_players.append(selection)
+            total_salary += int(df.loc[df["Player"] == selection, "Salary"].iloc[0])
 
     st.markdown("---")
     st.metric("Salary Used", f"${total_salary:,}")
     st.metric("Remaining", f"${salary_cap - total_salary:,}")
+
+    if total_salary > salary_cap:
+        st.error("Over the $50,000 salary cap. Try swapping to lower-cost players.")
 
 # -----------------------------
 # Value Table (Right)
