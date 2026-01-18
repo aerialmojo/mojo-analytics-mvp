@@ -3,7 +3,8 @@ import pandas as pd
 
 st.set_page_config(
     page_title="Mojo Analytics — Demo",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
 # -----------------------------
