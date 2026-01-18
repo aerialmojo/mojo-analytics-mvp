@@ -20,8 +20,19 @@ players = [
     {"Player": "Jalen Hurts", "Position": "QB", "Salary": 8200, "PPG_3": 24.1, "PPG_Season": 22.8},
     {"Player": "Josh Allen", "Position": "QB", "Salary": 8600, "PPG_3": 23.0, "PPG_Season": 23.5},
     {"Player": "Lamar Jackson", "Position": "QB", "Salary": 8000, "PPG_3": 21.8, "PPG_Season": 22.1},
+
     {"Player": "Christian McCaffrey", "Position": "RB", "Salary": 9000, "PPG_3": 26.4, "PPG_Season": 24.9},
+    {"Player": "Saquon Barkley", "Position": "RB", "Salary": 7600, "PPG_3": 19.8, "PPG_Season": 18.6},
+
     {"Player": "Tyreek Hill", "Position": "WR", "Salary": 8800, "PPG_3": 25.2, "PPG_Season": 23.7},
+    {"Player": "A.J. Brown", "Position": "WR", "Salary": 8100, "PPG_3": 21.4, "PPG_Season": 20.2},
+    {"Player": "CeeDee Lamb", "Position": "WR", "Salary": 8300, "PPG_3": 22.1, "PPG_Season": 21.0},
+
+    {"Player": "Travis Kelce", "Position": "TE", "Salary": 6800, "PPG_3": 16.2, "PPG_Season": 15.1},
+    {"Player": "Mark Andrews", "Position": "TE", "Salary": 6200, "PPG_3": 14.7, "PPG_Season": 13.9},
+
+    {"Player": "49ers DST", "Position": "DST", "Salary": 3200, "PPG_3": 9.4, "PPG_Season": 8.7},
+    {"Player": "Cowboys DST", "Position": "DST", "Salary": 3500, "PPG_3": 10.1, "PPG_Season": 9.1},
 ]
 
 df = pd.DataFrame(players)
