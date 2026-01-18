@@ -40,12 +40,15 @@ df = pd.DataFrame(players)
 df["Value_per_$1k"] = (df["PPG_Season"] / (df["Salary"] / 1000)).round(2)
 
 # -----------------------------
-# Roster Builder (Sidebar)
+# Layout
 # -----------------------------
-with st.sidebar:
-    st.markdown("## 🧩 Roster Builder")
-    st.caption("DraftKings-style demo roster")
+left, right = st.columns([1, 2])
 
+# -----------------------------
+# Roster Builder (Left)
+# -----------------------------
+with left:
+    st.markdown("### 🧩 Roster Builder (DraftKings-style Demo)")
     salary_cap = 50000
     total_salary = 0
     chosen_players = []
@@ -62,16 +65,19 @@ with st.sidebar:
         ("DST", ["DST"]),
     ]
 
-    # Sidebar is narrow, so single-column is cleaner than c1/c2
-    for slot_name, allowed_positions in slots:
-        slot_options = df[df["Position"].isin(allowed_positions)]["Player"].tolist()
-        slot_options = [p for p in slot_options if p not in chosen_players]  # prevent duplicates
+    c1, c2 = st.columns(2)
 
-        selection = st.selectbox(
-            slot_name,
-            ["—"] + slot_options,
-            key=f"slot_{slot_name}"
-        )
+    for i, (slot_name, allowed_positions) in enumerate(slots):
+        slot_options = df[df["Position"].isin(allowed_positions)]["Player"].tolist()
+        slot_options = [p for p in slot_options if p not in chosen_players]
+
+        target_col = c1 if i % 2 == 0 else c2
+        with target_col:
+            selection = st.selectbox(
+                slot_name,
+                ["—"] + slot_options,
+                key=f"slot_{slot_name}"
+            )
 
         if selection != "—":
             chosen_players.append(selection)
@@ -87,8 +93,8 @@ with st.sidebar:
 # -----------------------------
 # Value Table (Right)
 # -----------------------------
-
-st.markdown("### 📊 Player Value Overview")
+with right:
+    st.markdown("### 📊 Player Value Overview")
 
     value_col = "Value_per_$1k"
 
