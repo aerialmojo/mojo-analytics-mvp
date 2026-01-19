@@ -1,3 +1,5 @@
+import re
+import requests
 import streamlit as st
 import pandas as pd
 
@@ -15,121 +17,64 @@ st.subheader("Fantasy value explained in plain English.")
 st.info("This is a cloud-hosted demo. No betting advice, no guarantees.")
 
 # -----------------------------
-# Sample static player data (MVP only)
-# NOTE: Added last-3 passing/rushing/receiving stats.
-# Use 0s for non-applicable stats (e.g., WR passing yards).
+# Helpers
 # -----------------------------
-players = [
-    # QBs
-    {"Player": "Jalen Hurts", "Position": "QB", "Salary": 8200, "PPG_Season": 22.8,
-     "Pts_L1": 20.1, "Pts_L2": 27.4, "Pts_L3": 24.8,
-     "PassYds_L1": 210, "PassYds_L2": 285, "PassYds_L3": 240,
-     "PassTD_L1": 1, "PassTD_L2": 2, "PassTD_L3": 2,
-     "RushYds_L1": 45, "RushYds_L2": 62, "RushYds_L3": 51,
-     "RecYds_L1": 0, "RecYds_L2": 0, "RecYds_L3": 0,
-     "Rec_L1": 0, "Rec_L2": 0, "Rec_L3": 0},
+def normalize_name(s: str) -> str:
+    if s is None:
+        return ""
+    s = str(s).lower().strip()
+    # Remove punctuation/periods/apostrophes, collapse whitespace
+    s = re.sub(r"[^a-z0-9\s]", "", s)
+    s = re.sub(r"\s+", " ", s)
+    # common suffixes
+    s = re.sub(r"\b(jr|sr|ii|iii|iv)\b", "", s).strip()
+    return s
 
-    {"Player": "Josh Allen", "Position": "QB", "Salary": 8600, "PPG_Season": 23.5,
-     "Pts_L1": 18.7, "Pts_L2": 26.9, "Pts_L3": 23.4,
-     "PassYds_L1": 240, "PassYds_L2": 318, "PassYds_L3": 265,
-     "PassTD_L1": 1, "PassTD_L2": 3, "PassTD_L3": 2,
-     "RushYds_L1": 31, "RushYds_L2": 22, "RushYds_L3": 41,
-     "RecYds_L1": 0, "RecYds_L2": 0, "RecYds_L3": 0,
-     "Rec_L1": 0, "Rec_L2": 0, "Rec_L3": 0},
+def safe_col(df: pd.DataFrame, col: str, default=0):
+    return df[col] if col in df.columns else default
 
-    {"Player": "Lamar Jackson", "Position": "QB", "Salary": 8000, "PPG_Season": 22.1,
-     "Pts_L1": 21.0, "Pts_L2": 19.6, "Pts_L3": 28.1,
-     "PassYds_L1": 205, "PassYds_L2": 190, "PassYds_L3": 275,
-     "PassTD_L1": 1, "PassTD_L2": 1, "PassTD_L3": 2,
-     "RushYds_L1": 68, "RushYds_L2": 54, "RushYds_L3": 74,
-     "RecYds_L1": 0, "RecYds_L2": 0, "RecYds_L3": 0,
-     "Rec_L1": 0, "Rec_L2": 0, "Rec_L3": 0},
+def dk_fantasy_points(row: pd.Series) -> float:
+    """
+    DraftKings NFL classic scoring (core pieces).
+    Notes:
+    - Passing: 0.04/yd, 4/TD, -1/INT, +3 bonus for 300+ pass yds
+    - Rushing: 0.1/yd, 6/TD, +3 bonus for 100+ rush yds
+    - Receiving: 1/reception, 0.1/yd, 6/TD, +3 bonus for 100+ rec yds
+    - Fumbles lost: -1 (if available)
+    """
+    pass_yds = float(row.get("passing_yards", 0) or 0)
+    pass_td = float(row.get("passing_tds", 0) or 0)
+    ints = float(row.get("interceptions", 0) or 0)
 
-    # RBs
-    {"Player": "Christian McCaffrey", "Position": "RB", "Salary": 9000, "PPG_Season": 24.9,
-     "Pts_L1": 29.2, "Pts_L2": 22.4, "Pts_L3": 27.6,
-     "PassYds_L1": 0, "PassYds_L2": 0, "PassYds_L3": 0,
-     "PassTD_L1": 0, "PassTD_L2": 0, "PassTD_L3": 0,
-     "RushYds_L1": 112, "RushYds_L2": 86, "RushYds_L3": 104,
-     "RecYds_L1": 38, "RecYds_L2": 22, "RecYds_L3": 44,
-     "Rec_L1": 5, "Rec_L2": 3, "Rec_L3": 6},
+    rush_yds = float(row.get("rushing_yards", 0) or 0)
+    rush_td = float(row.get("rushing_tds", 0) or 0)
 
-    {"Player": "Saquon Barkley", "Position": "RB", "Salary": 7600, "PPG_Season": 18.6,
-     "Pts_L1": 16.2, "Pts_L2": 21.1, "Pts_L3": 17.9,
-     "PassYds_L1": 0, "PassYds_L2": 0, "PassYds_L3": 0,
-     "PassTD_L1": 0, "PassTD_L2": 0, "PassTD_L3": 0,
-     "RushYds_L1": 74, "RushYds_L2": 98, "RushYds_L3": 81,
-     "RecYds_L1": 18, "RecYds_L2": 34, "RecYds_L3": 21,
-     "Rec_L1": 3, "Rec_L2": 4, "Rec_L3": 2},
+    rec = float(row.get("receptions", 0) or 0)
+    rec_yds = float(row.get("receiving_yards", 0) or 0)
+    rec_td = float(row.get("receiving_tds", 0) or 0)
 
-    # WRs
-    {"Player": "Tyreek Hill", "Position": "WR", "Salary": 8800, "PPG_Season": 23.7,
-     "Pts_L1": 19.4, "Pts_L2": 31.0, "Pts_L3": 22.7,
-     "PassYds_L1": 0, "PassYds_L2": 0, "PassYds_L3": 0,
-     "PassTD_L1": 0, "PassTD_L2": 0, "PassTD_L3": 0,
-     "RushYds_L1": 6, "RushYds_L2": 0, "RushYds_L3": 9,
-     "RecYds_L1": 96, "RecYds_L2": 142, "RecYds_L3": 104,
-     "Rec_L1": 7, "Rec_L2": 10, "Rec_L3": 8},
+    fum_lost = float(row.get("fumbles_lost", 0) or 0)
 
-    {"Player": "A.J. Brown", "Position": "WR", "Salary": 8100, "PPG_Season": 20.2,
-     "Pts_L1": 14.8, "Pts_L2": 24.1, "Pts_L3": 18.9,
-     "PassYds_L1": 0, "PassYds_L2": 0, "PassYds_L3": 0,
-     "PassTD_L1": 0, "PassTD_L2": 0, "PassTD_L3": 0,
-     "RushYds_L1": 0, "RushYds_L2": 0, "RushYds_L3": 0,
-     "RecYds_L1": 72, "RecYds_L2": 118, "RecYds_L3": 84,
-     "Rec_L1": 5, "Rec_L2": 8, "Rec_L3": 6},
+    pts = 0.0
+    pts += pass_yds * 0.04
+    pts += pass_td * 4.0
+    pts += ints * -1.0
+    if pass_yds >= 300:
+        pts += 3.0
 
-    {"Player": "CeeDee Lamb", "Position": "WR", "Salary": 8300, "PPG_Season": 21.0,
-     "Pts_L1": 26.3, "Pts_L2": 17.2, "Pts_L3": 21.4,
-     "PassYds_L1": 0, "PassYds_L2": 0, "PassYds_L3": 0,
-     "PassTD_L1": 0, "PassTD_L2": 0, "PassTD_L3": 0,
-     "RushYds_L1": 0, "RushYds_L2": 4, "RushYds_L3": 0,
-     "RecYds_L1": 121, "RecYds_L2": 66, "RecYds_L3": 103,
-     "Rec_L1": 9, "Rec_L2": 6, "Rec_L3": 8},
+    pts += rush_yds * 0.10
+    pts += rush_td * 6.0
+    if rush_yds >= 100:
+        pts += 3.0
 
-    # TEs
-    {"Player": "Travis Kelce", "Position": "TE", "Salary": 6800, "PPG_Season": 15.1,
-     "Pts_L1": 10.4, "Pts_L2": 18.9, "Pts_L3": 14.2,
-     "PassYds_L1": 0, "PassYds_L2": 0, "PassYds_L3": 0,
-     "PassTD_L1": 0, "PassTD_L2": 0, "PassTD_L3": 0,
-     "RushYds_L1": 0, "RushYds_L2": 0, "RushYds_L3": 0,
-     "RecYds_L1": 54, "RecYds_L2": 88, "RecYds_L3": 61,
-     "Rec_L1": 4, "Rec_L2": 7, "Rec_L3": 5},
+    pts += rec * 1.0
+    pts += rec_yds * 0.10
+    pts += rec_td * 6.0
+    if rec_yds >= 100:
+        pts += 3.0
 
-    {"Player": "Mark Andrews", "Position": "TE", "Salary": 6200, "PPG_Season": 13.9,
-     "Pts_L1": 12.1, "Pts_L2": 15.8, "Pts_L3": 9.6,
-     "PassYds_L1": 0, "PassYds_L2": 0, "PassYds_L3": 0,
-     "PassTD_L1": 0, "PassTD_L2": 0, "PassTD_L3": 0,
-     "RushYds_L1": 0, "RushYds_L2": 0, "RushYds_L3": 0,
-     "RecYds_L1": 63, "RecYds_L2": 71, "RecYds_L3": 42,
-     "Rec_L1": 6, "Rec_L2": 6, "Rec_L3": 4},
-
-    # DST (keep fantasy points only in MVP)
-    {"Player": "49ers DST", "Position": "DST", "Salary": 3200, "PPG_Season": 8.7,
-     "Pts_L1": 7.0, "Pts_L2": 11.0, "Pts_L3": 10.2,
-     "PassYds_L1": 0, "PassYds_L2": 0, "PassYds_L3": 0,
-     "PassTD_L1": 0, "PassTD_L2": 0, "PassTD_L3": 0,
-     "RushYds_L1": 0, "RushYds_L2": 0, "RushYds_L3": 0,
-     "RecYds_L1": 0, "RecYds_L2": 0, "RecYds_L3": 0,
-     "Rec_L1": 0, "Rec_L2": 0, "Rec_L3": 0},
-
-    {"Player": "Cowboys DST", "Position": "DST", "Salary": 3500, "PPG_Season": 9.1,
-     "Pts_L1": 6.0, "Pts_L2": 13.4, "Pts_L3": 9.8,
-     "PassYds_L1": 0, "PassYds_L2": 0, "PassYds_L3": 0,
-     "PassTD_L1": 0, "PassTD_L2": 0, "PassTD_L3": 0,
-     "RushYds_L1": 0, "RushYds_L2": 0, "RushYds_L3": 0,
-     "RecYds_L1": 0, "RecYds_L2": 0, "RecYds_L3": 0,
-     "Rec_L1": 0, "Rec_L2": 0, "Rec_L3": 0},
-]
-
-df = pd.DataFrame(players)
-
-# -----------------------------
-# Derived metrics
-# -----------------------------
-df["Avg_Last3"] = df[["Pts_L1", "Pts_L2", "Pts_L3"]].mean(axis=1).round(1)
-df["Value_Last3_per_$1k"] = (df["Avg_Last3"] / (df["Salary"] / 1000)).round(2)
-df["Value_Season_per_$1k"] = (df["PPG_Season"] / (df["Salary"] / 1000)).round(2)
+    pts += fum_lost * -1.0
+    return round(pts, 2)
 
 def sparkline(vals):
     blocks = "▁▂▃▄▅▆▇█"
@@ -142,6 +87,203 @@ def sparkline(vals):
         out += blocks[idx]
     return out
 
+# -----------------------------
+# Load DraftKings weekly pool (CSV upload)
+# -----------------------------
+@st.cache_data(ttl=3600)
+def load_dk_csv(uploaded_file) -> pd.DataFrame:
+    raw = pd.read_csv(uploaded_file)
+
+    # Normalize likely DK columns
+    cols = {c.lower(): c for c in raw.columns}
+
+    def pick(*names):
+        for n in names:
+            if n.lower() in cols:
+                return cols[n.lower()]
+        return None
+
+    name_col = pick("Name", "Player", "Nickname")
+    pos_col  = pick("Position", "Roster Position", "RosterPosition")
+    sal_col  = pick("Salary")
+    team_col = pick("TeamAbbrev", "Team", "Team Abbrev", "team")
+
+    if not (name_col and pos_col and sal_col):
+        raise ValueError(f"DK CSV missing required columns. Found: {list(raw.columns)}")
+
+    df = pd.DataFrame({
+        "Player": raw[name_col].astype(str),
+        "Position": raw[pos_col].astype(str).str.upper().str.strip(),
+        "Salary": pd.to_numeric(raw[sal_col], errors="coerce").fillna(0).astype(int),
+        "Team": raw[team_col].astype(str) if team_col else ""
+    })
+
+    # Keep classic NFL positions
+    df = df[df["Position"].isin(["QB", "RB", "WR", "TE", "DST"])].copy()
+    df["player_key"] = df["Player"].apply(normalize_name)
+
+    # DK DST names may be like "49ers" or "San Francisco"; keep as-is for now
+    return df.reset_index(drop=True)
+
+# -----------------------------
+# Load free weekly player stats (nflverse)
+# -----------------------------
+@st.cache_data(ttl=3600)
+def load_nflverse_weekly_player_stats(season: int) -> pd.DataFrame:
+    # Public release CSVs (free). Example known pattern in nflverse-data releases.
+    # This is the common filename used by the community.
+    url = f"https://github.com/nflverse/nflverse-data/releases/download/player_stats/stats_player_week_{season}.csv"
+    r = requests.get(url, timeout=30)
+    r.raise_for_status()
+
+    stats = pd.read_csv(pd.io.common.BytesIO(r.content))
+
+    # Try to normalize expected columns across versions
+    # Common nflverse columns include:
+    # player_name, position, week, passing_yards, passing_tds, interceptions,
+    # rushing_yards, rushing_tds, receiving_yards, receiving_tds, receptions, fumbles_lost, etc.
+    if "player_name" not in stats.columns:
+        # Sometimes it might be "player_display_name" or similar
+        for alt in ["player_display_name", "name", "player"]:
+            if alt in stats.columns:
+                stats = stats.rename(columns={alt: "player_name"})
+                break
+
+    if "week" not in stats.columns:
+        for alt in ["week_num", "game_week"]:
+            if alt in stats.columns:
+                stats = stats.rename(columns={alt: "week"})
+                break
+
+    if "position" not in stats.columns:
+        for alt in ["pos"]:
+            if alt in stats.columns:
+                stats = stats.rename(columns={alt: "position"})
+                break
+
+    # Keep only skill positions + QB for now; DST handled separately
+    stats["player_key"] = stats["player_name"].apply(normalize_name)
+    stats["position"] = stats["position"].astype(str).str.upper().str.strip()
+    stats["week"] = pd.to_numeric(stats["week"], errors="coerce")
+
+    # Compute DK fantasy points from available stat columns
+    stats["dk_points"] = stats.apply(dk_fantasy_points, axis=1)
+
+    return stats
+
+def build_last3_and_season_metrics(stats: pd.DataFrame, up_to_week: int) -> pd.DataFrame:
+    """
+    Returns one row per player with:
+    - last 3 fantasy points (Pts_L1/L2/L3)
+    - last 3 passing/rushing/receiving stats
+    - season avg DK points up to (up_to_week-1)
+    """
+    s = stats.copy()
+    s = s[s["week"].notna()].copy()
+    s = s[s["week"] < up_to_week].copy()
+
+    # If user picks week 1, there is no "previous" data; handle gracefully
+    if s.empty:
+        return pd.DataFrame(columns=["player_key"])
+
+    # Sort so we can take last 3 games
+    s = s.sort_values(["player_key", "week"], ascending=[True, False])
+
+    # Take last 3 rows per player
+    last3 = s.groupby("player_key").head(3).copy()
+
+    # Rank within last3 so we can pivot into L1/L2/L3
+    last3["rank"] = last3.groupby("player_key").cumcount() + 1  # 1..3
+
+    # Pivot DK points
+    pts_pivot = last3.pivot_table(index="player_key", columns="rank", values="dk_points", aggfunc="first")
+    pts_pivot = pts_pivot.rename(columns={1: "Pts_L1", 2: "Pts_L2", 3: "Pts_L3"}).reset_index()
+
+    # Pivot some core stats we care about
+    def pivot_stat(col, out_prefix):
+        if col not in last3.columns:
+            return None
+        p = last3.pivot_table(index="player_key", columns="rank", values=col, aggfunc="first")
+        p = p.rename(columns={1: f"{out_prefix}_L1", 2: f"{out_prefix}_L2", 3: f"{out_prefix}_L3"}).reset_index()
+        return p
+
+    pivots = [pts_pivot]
+
+    for col, pref in [
+        ("passing_yards", "PassYds"),
+        ("passing_tds", "PassTD"),
+        ("rushing_yards", "RushYds"),
+        ("receiving_yards", "RecYds"),
+        ("receptions", "Rec"),
+    ]:
+        p = pivot_stat(col, pref)
+        if p is not None:
+            pivots.append(p)
+
+    # Merge all pivots
+    out = pivots[0]
+    for p in pivots[1:]:
+        out = out.merge(p, on="player_key", how="left")
+
+    # Season average DK points up to week-1
+    season_avg = s.groupby("player_key")["dk_points"].mean().reset_index().rename(columns={"dk_points": "PPG_Season"})
+    out = out.merge(season_avg, on="player_key", how="left")
+
+    # Fill missing last3 with NaN -> 0 (players with <3 games)
+    for c in out.columns:
+        if c != "player_key":
+            out[c] = pd.to_numeric(out[c], errors="coerce")
+
+    return out
+
+# -----------------------------
+# UI: choose week/season + upload DK CSV
+# -----------------------------
+st.markdown("## 📥 Data Source")
+
+cA, cB, cC = st.columns([1, 1, 2])
+
+with cA:
+    season = st.number_input("Season", min_value=2016, max_value=2030, value=2025, step=1)
+
+with cB:
+    week = st.number_input("Current Week", min_value=1, max_value=22, value=1, step=1)
+    st.caption("Last-3 + season stats are computed using games **before** this week.")
+
+with cC:
+    uploaded = st.file_uploader("Upload DraftKings NFL salary CSV", type=["csv"])
+
+if not uploaded:
+    st.info("Upload a DraftKings salary CSV to populate the real weekly pool.")
+    st.stop()
+
+dk_pool = load_dk_csv(uploaded)
+
+# Load free weekly stats and build features
+stats = load_nflverse_weekly_player_stats(int(season))
+metrics = build_last3_and_season_metrics(stats, up_to_week=int(week))
+
+# Merge metrics into DK pool
+df = dk_pool.merge(metrics, on="player_key", how="left")
+
+# Default missing stats to 0 (and PPG to 0 if no games yet)
+for col in [
+    "Pts_L1", "Pts_L2", "Pts_L3",
+    "PassYds_L1", "PassYds_L2", "PassYds_L3",
+    "PassTD_L1", "PassTD_L2", "PassTD_L3",
+    "RushYds_L1", "RushYds_L2", "RushYds_L3",
+    "RecYds_L1", "RecYds_L2", "RecYds_L3",
+    "Rec_L1", "Rec_L2", "Rec_L3",
+    "PPG_Season",
+]:
+    if col not in df.columns:
+        df[col] = 0
+    df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+# Derived metrics for your UI
+df["Avg_Last3"] = df[["Pts_L1", "Pts_L2", "Pts_L3"]].mean(axis=1).round(1)
+df["Value_Last3_per_$1k"] = (df["Avg_Last3"] / (df["Salary"] / 1000)).replace([pd.NA, pd.NaT], 0).fillna(0).round(2)
+df["Value_Season_per_$1k"] = (df["PPG_Season"] / (df["Salary"] / 1000)).replace([pd.NA, pd.NaT], 0).fillna(0).round(2)
 df["Last3_Spark"] = df.apply(lambda r: sparkline([r["Pts_L1"], r["Pts_L2"], r["Pts_L3"]]), axis=1)
 
 # -----------------------------
@@ -258,15 +400,19 @@ pool_df = df.copy()
 if pos_filter != "ALL":
     pool_df = pool_df[pool_df["Position"] == pos_filter]
 
-display_cols = ["Player", "Position", "Salary", "PPG_Season", "Last3_Spark", "Avg_Last3", "Value_Last3_per_$1k"]
+display_cols = ["Player", "Position", "Team", "Salary", "PPG_Season", "Last3_Spark", "Avg_Last3", "Value_Last3_per_$1k"]
 pool_view = pool_df[display_cols].copy()
 
 st.data_editor(pool_view, use_container_width=True, hide_index=True, disabled=True)
 
 # -----------------------------
-# Main: Player Details (replaces old Value Overview)
+# Main: Player Details
 # -----------------------------
 st.markdown("## 🔎 Player Details")
+
+if pool_df.empty:
+    st.warning("No players found for this filter.")
+    st.stop()
 
 detail_player = st.selectbox(
     "Select a player from this week's pool",
@@ -281,12 +427,12 @@ st.markdown(f"#### {row['Player']} ({pos})")
 
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Salary", f"${int(row['Salary']):,}")
-m2.metric("Season Avg", f"{row['PPG_Season']:.1f}")
-m3.metric("Avg Last 3", f"{row['Avg_Last3']:.1f}")
+m2.metric("Season Avg (DK pts)", f"{row['PPG_Season']:.2f}")
+m3.metric("Avg Last 3 (DK pts)", f"{row['Avg_Last3']:.2f}")
 m4.metric("Value (Last 3) / $1k", f"{row['Value_Last3_per_$1k']:.2f}")
 
 # Last 3 fantasy points
-st.markdown("**Last 3 Fantasy Points**")
+st.markdown("**Last 3 Fantasy Points (DraftKings scoring)**")
 pts_df = pd.DataFrame({
     "Game": ["L1", "L2", "L3"],
     "FantasyPts": [row["Pts_L1"], row["Pts_L2"], row["Pts_L3"]],
@@ -313,7 +459,7 @@ elif pos in ["RB", "WR", "TE"]:
         "RecYds": [row["RecYds_L1"], row["RecYds_L2"], row["RecYds_L3"]],
         "FantasyPts": [row["Pts_L1"], row["Pts_L2"], row["Pts_L3"]],
     })
-else:  # DST
+else:  # DST – we don’t have free standardized DST boxscore stats in this file
     detail_df = pd.DataFrame({
         "Game": ["L1", "L2", "L3"],
         "FantasyPts": [row["Pts_L1"], row["Pts_L2"], row["Pts_L3"]],
@@ -321,4 +467,7 @@ else:  # DST
 
 st.dataframe(detail_df, use_container_width=True, hide_index=True)
 
-st.caption("This is MVP demo data. In the real app, these stats would be pulled for the current slate/week.")
+st.caption(
+    "Weekly player stats are pulled from nflverse public data files; DK fantasy points are computed in-app. "
+    "Name matching is best-effort; a small manual mapping table can improve edge cases."
+)
