@@ -18,26 +18,23 @@ st.info("This is a cloud-hosted demo. No betting advice, no guarantees.")
 # Sample static player data (MVP only)
 # -----------------------------
 players = [
-    {"Player": "Jalen Hurts", "Position": "QB", "Salary": 8200, "PPG_3": 24.1, "PPG_Season": 22.8},
-    {"Player": "Josh Allen", "Position": "QB", "Salary": 8600, "PPG_3": 23.0, "PPG_Season": 23.5},
-    {"Player": "Lamar Jackson", "Position": "QB", "Salary": 8000, "PPG_3": 21.8, "PPG_Season": 22.1},
+    {"Player": "Jalen Hurts", "Position": "QB", "Salary": 8200, "PPG_Season": 22.8, "Pts_L1": 20.1, "Pts_L2": 27.4, "Pts_L3": 24.8},
+    {"Player": "Josh Allen", "Position": "QB", "Salary": 8600, "PPG_Season": 23.5, "Pts_L1": 18.7, "Pts_L2": 26.9, "Pts_L3": 23.4},
+    {"Player": "Lamar Jackson", "Position": "QB", "Salary": 8000, "PPG_Season": 22.1, "Pts_L1": 21.0, "Pts_L2": 19.6, "Pts_L3": 28.1},
 
-    {"Player": "Christian McCaffrey", "Position": "RB", "Salary": 9000, "PPG_3": 26.4, "PPG_Season": 24.9},
-    {"Player": "Saquon Barkley", "Position": "RB", "Salary": 7600, "PPG_3": 19.8, "PPG_Season": 18.6},
+    {"Player": "Christian McCaffrey", "Position": "RB", "Salary": 9000, "PPG_Season": 24.9, "Pts_L1": 29.2, "Pts_L2": 22.4, "Pts_L3": 27.6},
+    {"Player": "Saquon Barkley", "Position": "RB", "Salary": 7600, "PPG_Season": 18.6, "Pts_L1": 16.2, "Pts_L2": 21.1, "Pts_L3": 17.9},
 
-    {"Player": "Tyreek Hill", "Position": "WR", "Salary": 8800, "PPG_3": 25.2, "PPG_Season": 23.7},
-    {"Player": "A.J. Brown", "Position": "WR", "Salary": 8100, "PPG_3": 21.4, "PPG_Season": 20.2},
-    {"Player": "CeeDee Lamb", "Position": "WR", "Salary": 8300, "PPG_3": 22.1, "PPG_Season": 21.0},
+    {"Player": "Tyreek Hill", "Position": "WR", "Salary": 8800, "PPG_Season": 23.7, "Pts_L1": 19.4, "Pts_L2": 31.0, "Pts_L3": 22.7},
+    {"Player": "A.J. Brown", "Position": "WR", "Salary": 8100, "PPG_Season": 20.2, "Pts_L1": 14.8, "Pts_L2": 24.1, "Pts_L3": 18.9},
+    {"Player": "CeeDee Lamb", "Position": "WR", "Salary": 8300, "PPG_Season": 21.0, "Pts_L1": 26.3, "Pts_L2": 17.2, "Pts_L3": 21.4},
 
-    {"Player": "Travis Kelce", "Position": "TE", "Salary": 6800, "PPG_3": 16.2, "PPG_Season": 15.1},
-    {"Player": "Mark Andrews", "Position": "TE", "Salary": 6200, "PPG_3": 14.7, "PPG_Season": 13.9},
+    {"Player": "Travis Kelce", "Position": "TE", "Salary": 6800, "PPG_Season": 15.1, "Pts_L1": 10.4, "Pts_L2": 18.9, "Pts_L3": 14.2},
+    {"Player": "Mark Andrews", "Position": "TE", "Salary": 6200, "PPG_Season": 13.9, "Pts_L1": 12.1, "Pts_L2": 15.8, "Pts_L3": 9.6},
 
-    {"Player": "49ers DST", "Position": "DST", "Salary": 3200, "PPG_3": 9.4, "PPG_Season": 8.7},
-    {"Player": "Cowboys DST", "Position": "DST", "Salary": 3500, "PPG_3": 10.1, "PPG_Season": 9.1},
+    {"Player": "49ers DST", "Position": "DST", "Salary": 3200, "PPG_Season": 8.7, "Pts_L1": 7.0, "Pts_L2": 11.0, "Pts_L3": 10.2},
+    {"Player": "Cowboys DST", "Position": "DST", "Salary": 3500, "PPG_Season": 9.1, "Pts_L1": 6.0, "Pts_L2": 13.4, "Pts_L3": 9.8},
 ]
-
-df = pd.DataFrame(players)
-df["Value_per_$1k"] = (df["PPG_Season"] / (df["Salary"] / 1000)).round(2)
 
 # -----------------------------
 # Layout
