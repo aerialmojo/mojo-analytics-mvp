@@ -36,6 +36,29 @@ players = [
     {"Player": "Cowboys DST", "Position": "DST", "Salary": 3500, "PPG_Season": 9.1, "Pts_L1": 6.0, "Pts_L2": 13.4, "Pts_L3": 9.8},
 ]
 
+df = pd.DataFrame(players)
+# Last 3 average + value metric
+df["Avg_Last3"] = df[["Pts_L1", "Pts_L2", "Pts_L3"]].mean(axis=1).round(1)
+df["Value_Last3_per_$1k"] = (df["Avg_Last3"] / (df["Salary"] / 1000)).round(2)
+
+# Sparkline (simple text version)
+def sparkline(vals):
+    # map values to 8-level blocks
+    blocks = "▁▂▃▄▅▆▇█"
+    vmin, vmax = min(vals), max(vals)
+    if vmax == vmin:
+        return blocks[3] * len(vals)
+    out = ""
+    for v in vals:
+        idx = int((v - vmin) / (vmax - vmin) * (len(blocks) - 1))
+        out += blocks[idx]
+    return out
+
+df["Last3_Spark"] = df.apply(lambda r: sparkline([r["Pts_L1"], r["Pts_L2"], r["Pts_L3"]]), axis=1)
+
+# Keep your original season-value metric if you want it
+df["Value_per_$1k"] = (df["PPG_Season"] / (df["Salary"] / 1000)).round(2)
+
 # -----------------------------
 # Layout
 # -----------------------------
