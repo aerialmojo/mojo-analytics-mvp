@@ -198,26 +198,6 @@ st.data_editor(
     disabled=True
 )
 
-st.markdown("### ➕ Assign a Player to a Roster Slot")
-player_choice = st.selectbox("Choose Player", ["—"] + pool_df["Player"].tolist(), key="pool_player_choice")
-slot_choice = st.selectbox("Assign to Slot", slot_names, key="pool_slot_choice")
-
-if st.button("Add to Slot", type="primary"):
-    if player_choice == "—":
-        st.warning("Pick a player first.")
-    else:
-        # Prevent duplicates (basic): remove player from any other slot first
-        for sn in slot_names:
-            if st.session_state.get(f"slot_{sn}", "—") == player_choice:
-                st.session_state[f"slot_{sn}"] = "—"
-                st.session_state[f"ui_{sn}"] = "—"
-
-        st.session_state[f"slot_{slot_choice}"] = player_choice
-        st.success(f"Added {player_choice} to {slot_choice}.")
-        st.rerun()
-
-st.markdown("---")
-
 # -----------------------------
 # Main: Value overview table (color-coded)
 # -----------------------------
