@@ -1,194 +1,540 @@
-import streamlit as st
+# app.py — Mojo Analytics (NFL) — Streamlit
+# - Pulls weekly player stats via nfl-data-py (nflreadpy)
+# - Builds DraftKings-style roster builder in sidebar
+# - Shows player pool + details w/ last-3 game breakdown
+# - Adds trend arrows (up / down / flat) for DK points last-3
+#
+# Requirements (requirements.txt):
+# streamlit>=1.37,<2
+# pandas>=2.1,<3
+# numpy>=1.26,<3
+# nfl-data-py
+
+import re
+import numpy as np
 import pandas as pd
-from datetime import datetime
+import streamlit as st
 
-from data_utils import load_player_stats
+# If you keep data_utils.py in the repo:
+from data_utils import load_player_stats  # uses nflreadpy (nfl-data-py)
 
-# --------------------------------------------------------
+# -----------------------------
 # Page config
-# --------------------------------------------------------
+# -----------------------------
 st.set_page_config(
     page_title="Mojo Analytics — Demo",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# --------------------------------------------------------
+# -----------------------------
 # Header
-# --------------------------------------------------------
+# -----------------------------
 st.title("Mojo Analytics — Demo")
 st.subheader("Fantasy value explained in plain English.")
 st.info("This is a cloud-hosted demo. No betting advice, no guarantees.")
 
-# --------------------------------------------------------
-# Load REAL weekly stats (WORKING PIPELINE)
-# --------------------------------------------------------
-@st.cache_data
-def get_player_stats():
-    df = load_player_stats([2023, 2024, 2025])
-    df = df.dropna(subset=["player_display_name", "week", "season"])
-    return df
 
-stats = get_player_stats()
+# -----------------------------
+# Helpers
+# -----------------------------
+def normalize_name(s: str) -> str:
+    if s is None:
+        return ""
+    s = str(s).lower().strip()
+    s = re.sub(r"[^a-z0-9\s]", "", s)
+    s = re.sub(r"\s+", " ", s)
+    s = re.sub(r"\b(jr|sr|ii|iii|iv)\b", "", s).strip()
+    return s
 
-# --------------------------------------------------------
-# Sidebar: Season + Week
-# --------------------------------------------------------
-with st.sidebar:
-    st.markdown("### 📅 Season / Week")
 
-    seasons = sorted(stats["season"].unique().tolist())
-    season = st.selectbox("Season", seasons, index=len(seasons) - 1)
-
-    season_df = stats[stats["season"] == season]
-    max_week = int(season_df["week"].max())
-
-    week = st.slider(
-        "Evaluate trends up to week",
-        min_value=3,
-        max_value=max_week,
-        value=max_week,
-        step=1,
-    )
-
-# --------------------------------------------------------
-# Compute DraftKings fantasy points (1 decimal)
-# --------------------------------------------------------
-def dk_points(row):
-    pts = 0.0
-    pts += row.get("passing_yards", 0) * 0.04
-    pts += row.get("passing_tds", 0) * 4
-    pts -= row.get("interceptions", 0)
-    pts += row.get("rushing_yards", 0) * 0.1
-    pts += row.get("rushing_tds", 0) * 6
-    pts += row.get("receiving_yards", 0) * 0.1
-    pts += row.get("receiving_tds", 0) * 6
-    pts += row.get("receptions", 0)
-    pts -= row.get("fumbles_lost", 0)
-    return round(pts, 1)
-
-stats["dk_points"] = stats.apply(dk_points, axis=1)
-
-# --------------------------------------------------------
-# Last-3 games (chronological)
-# --------------------------------------------------------
-recent = (
-    stats[
-        (stats["season"] == season) &
-        (stats["week"] <= week)
-    ]
-    .sort_values(["player_display_name", "week"])
-    .groupby("player_display_name")
-    .tail(3)
-)
-
-# Label weeks (W18, W19, etc.)
-recent["WeekLabel"] = recent["week"].apply(lambda w: f"W{int(w)}")
-
-# --------------------------------------------------------
-# Aggregate per player
-# --------------------------------------------------------
-agg = (
-    recent
-    .groupby("player_display_name")
-    .agg(
-        Position=("position", "first"),
-        Team=("recent_team", "first"),
-        Weeks=("WeekLabel", list),
-        Pts=("dk_points", list),
-        Avg_Last3=("dk_points", "mean"),
-    )
-    .reset_index()
-)
-
-agg["Avg_Last3"] = agg["Avg_Last3"].round(1)
-
-# --------------------------------------------------------
-# Trend arrow
-# --------------------------------------------------------
-def trend_arrow(vals):
-    if len(vals) < 2:
-        return "➖"
-    if vals[-1] > vals[0]:
-        return "🔺"
-    if vals[-1] < vals[0]:
-        return "🔻"
-    return "➖"
-
-agg["Trend"] = agg["Pts"].apply(trend_arrow)
-
-# --------------------------------------------------------
-# Sparkline (OLD → NEW)
-# --------------------------------------------------------
 def sparkline(vals):
     blocks = "▁▂▃▄▅▆▇█"
-    lo, hi = min(vals), max(vals)
-    if hi == lo:
+    vals = [0 if v is None else float(v) for v in vals]
+    vmin, vmax = min(vals), max(vals)
+    if vmax == vmin:
         return blocks[3] * len(vals)
-    return "".join(
-        blocks[int((v - lo) / (hi - lo) * (len(blocks) - 1))]
-        for v in vals
+    out = ""
+    for v in vals:
+        idx = int((v - vmin) / (vmax - vmin) * (len(blocks) - 1))
+        out += blocks[idx]
+    return out
+
+
+def trend_arrow(v1, v2, v3, flat_eps: float = 0.75) -> str:
+    """
+    Simple trend: compare last to first of the 3.
+    - flat_eps controls how much change counts as "flat".
+    """
+    try:
+        a, b, c = float(v1), float(v2), float(v3)
+    except Exception:
+        return "→"
+    delta = c - a
+    if abs(delta) <= flat_eps:
+        return "→"
+    return "↑" if delta > 0 else "↓"
+
+
+def safe_num(series_or_val, default=0.0):
+    try:
+        if pd.isna(series_or_val):
+            return default
+        return float(series_or_val)
+    except Exception:
+        return default
+
+
+def compute_dk_points(df: pd.DataFrame) -> pd.Series:
+    """
+    DK scoring (simplified but practical for skill players/QBs):
+      Passing: 0.04/yd, 4/TD, -1 INT, +3 at 300+
+      Rushing: 0.1/yd, 6/TD, +3 at 100+
+      Receiving: 1/rec, 0.1/yd, 6/TD, +3 at 100+
+      Fumbles lost: -1 each
+      2PT: +2 each (pass/rush/rec)
+    """
+    # Fill missing columns with 0
+    needed = [
+        "passing_yards", "passing_tds", "interceptions",
+        "rushing_yards", "rushing_tds",
+        "receptions", "receiving_yards", "receiving_tds",
+        "fumbles_lost",
+        "passing_2pt_conversions", "rushing_2pt_conversions", "receiving_2pt_conversions",
+    ]
+    for c in needed:
+        if c not in df.columns:
+            df[c] = 0
+
+    pass_yds = pd.to_numeric(df["passing_yards"], errors="coerce").fillna(0)
+    pass_td = pd.to_numeric(df["passing_tds"], errors="coerce").fillna(0)
+    ints = pd.to_numeric(df["interceptions"], errors="coerce").fillna(0)
+
+    rush_yds = pd.to_numeric(df["rushing_yards"], errors="coerce").fillna(0)
+    rush_td = pd.to_numeric(df["rushing_tds"], errors="coerce").fillna(0)
+
+    rec = pd.to_numeric(df["receptions"], errors="coerce").fillna(0)
+    rec_yds = pd.to_numeric(df["receiving_yards"], errors="coerce").fillna(0)
+    rec_td = pd.to_numeric(df["receiving_tds"], errors="coerce").fillna(0)
+
+    fum_lost = pd.to_numeric(df["fumbles_lost"], errors="coerce").fillna(0)
+
+    p2 = pd.to_numeric(df["passing_2pt_conversions"], errors="coerce").fillna(0)
+    r2 = pd.to_numeric(df["rushing_2pt_conversions"], errors="coerce").fillna(0)
+    rc2 = pd.to_numeric(df["receiving_2pt_conversions"], errors="coerce").fillna(0)
+
+    pts = (
+        pass_yds * 0.04
+        + pass_td * 4
+        + ints * -1
+        + rush_yds * 0.10
+        + rush_td * 6
+        + rec * 1
+        + rec_yds * 0.10
+        + rec_td * 6
+        + fum_lost * -1
+        + (p2 + r2 + rc2) * 2
     )
 
-agg["Last3_Spark"] = agg["Pts"].apply(sparkline)
+    pts = pts + (pass_yds >= 300).astype(int) * 3
+    pts = pts + (rush_yds >= 100).astype(int) * 3
+    pts = pts + (rec_yds >= 100).astype(int) * 3
 
-# --------------------------------------------------------
-# Player Pool
-# --------------------------------------------------------
-st.markdown("## 🧾 Player Pool")
+    return pts.round(1)
 
-c1, c2 = st.columns([1, 2])
-with c1:
-    pos_filter = st.selectbox(
-        "Position",
-        ["ALL"] + sorted(agg["Position"].dropna().unique().tolist())
-    )
-with c2:
-    search = st.text_input("Search player")
 
-pool = agg.copy()
-if pos_filter != "ALL":
-    pool = pool[pool["Position"] == pos_filter]
-if search:
-    pool = pool[pool["player_display_name"].str.lower().str.contains(search.lower())]
+# -----------------------------
+# Load weekly stats (real)
+# -----------------------------
+@st.cache_data(ttl=6 * 60 * 60)
+def get_player_stats_cached(seasons):
+    df = load_player_stats(seasons)
+    df = df.dropna(subset=["player_display_name", "season", "week"])
+    # Normalize column names expected downstream
+    if "recent_team" not in df.columns and "team" in df.columns:
+        df["recent_team"] = df["team"]
+    if "position" not in df.columns:
+        df["position"] = None
+    return df
 
-pool_view = pool[
-    ["player_display_name", "Position", "Team", "Last3_Spark", "Avg_Last3", "Trend"]
-].rename(columns={
-    "player_display_name": "Player",
-    "Avg_Last3": "Avg DK (Last 3)"
-})
 
-st.dataframe(pool_view, use_container_width=True, hide_index=True)
+# Sidebar season selection: last 3 seasons including 2025 if available
+with st.sidebar:
+    st.markdown("### 📅 Season")
+    seasons_available = [2025, 2024, 2023]  # keep it explicit like you asked
+    season = st.selectbox("Choose season", seasons_available, index=0)
+    st.caption("Stats pulled automatically via nfl-data-py (free).")
 
-# --------------------------------------------------------
-# Player Details
-# --------------------------------------------------------
-st.markdown("## 🔎 Player Details")
 
-if pool.empty:
+try:
+    weekly = get_player_stats_cached([2023, 2024, 2025])
+except Exception as e:
+    st.error("Could not load weekly player stats.")
+    st.code(str(e))
     st.stop()
 
-player = st.selectbox("Select player", pool["player_display_name"].tolist())
-row = pool[pool["player_display_name"] == player].iloc[0]
+weekly["season"] = pd.to_numeric(weekly["season"], errors="coerce")
+weekly["week"] = pd.to_numeric(weekly["week"], errors="coerce")
 
-st.markdown(f"### {player} ({row['Position']} – {row['Team']})")
+weekly = weekly[weekly["season"] == int(season)].copy()
+if weekly.empty:
+    st.warning(f"No weekly data found for season {season}.")
+    st.stop()
 
-m1, m2, m3 = st.columns(3)
-m1.metric("Avg DK (Last 3)", f"{row['Avg_Last3']:.1f}")
-m2.metric("Trend", row["Trend"])
-m3.metric("Games Used", len(row["Pts"]))
+# Build DK points from raw stats (1 decimal)
+weekly["dk_points"] = compute_dk_points(weekly)
 
-detail_df = pd.DataFrame({
-    "Week": row["Weeks"],
-    "DK Points": [round(v, 1) for v in row["Pts"]],
-})
+# Detect latest week available in the chosen season
+latest_week = int(pd.to_numeric(weekly["week"], errors="coerce").max())
 
-st.dataframe(detail_df, use_container_width=True, hide_index=True)
-st.line_chart(detail_df.set_index("Week"))
+with st.sidebar:
+    st.markdown("### 🗓️ Week")
+    mode = st.radio(
+        "Last-3 mode",
+        ["Latest available", "Choose a week"],
+        index=0,
+        horizontal=True,
+    )
+    if mode == "Latest available":
+        up_to_week = latest_week + 1
+        st.caption(f"Using last-3 games prior to Week {up_to_week} (latest in data: Week {latest_week}).")
+    else:
+        up_to_week = st.slider(
+            "Compute last-3 games before this week",
+            min_value=1,
+            max_value=latest_week + 1,
+            value=latest_week + 1,
+            step=1,
+        )
+
+# Only games BEFORE up_to_week
+weekly_cut = weekly[weekly["week"] < int(up_to_week)].copy()
+if weekly_cut.empty:
+    st.warning("No games found before that week. Choose a later week.")
+    st.stop()
+
+# -----------------------------
+# Build player-level metrics: last 3 games played + season averages
+# -----------------------------
+weekly_cut = weekly_cut.sort_values(["player_display_name", "week"], ascending=[True, False])
+last3 = weekly_cut.groupby("player_display_name").head(3).copy()
+last3["rank"] = last3.groupby("player_display_name").cumcount() + 1
+
+def pivot_last3(col, pref):
+    if col not in last3.columns:
+        return None
+    p = last3.pivot_table(index="player_display_name", columns="rank", values=col, aggfunc="first")
+    p = p.rename(columns={1: f"{pref}_L1", 2: f"{pref}_L2", 3: f"{pref}_L3"}).reset_index()
+    return p
+
+metrics = pivot_last3("dk_points", "Pts")
+if metrics is None:
+    metrics = pd.DataFrame({"player_display_name": weekly_cut["player_display_name"].unique()})
+
+for col, pref in [
+    ("passing_yards", "PassYds"),
+    ("passing_tds", "PassTD"),
+    ("rushing_yards", "RushYds"),
+    ("receiving_yards", "RecYds"),
+    ("receptions", "Rec"),
+]:
+    p = pivot_last3(col, pref)
+    if p is not None:
+        metrics = metrics.merge(p, on="player_display_name", how="left")
+
+# Season average DK points (using games before up_to_week)
+season_avg = (
+    weekly_cut.groupby("player_display_name")["dk_points"]
+    .mean()
+    .reset_index()
+    .rename(columns={"dk_points": "PPG_Season"})
+)
+metrics = metrics.merge(season_avg, on="player_display_name", how="left")
+
+# Attach identity (pos/team) from most recent record available in cut
+identity = (
+    weekly_cut.sort_values(["player_display_name", "week"], ascending=[True, False])
+    .drop_duplicates("player_display_name")[["player_display_name", "position", "recent_team"]]
+    .rename(columns={"position": "Position", "recent_team": "Team"})
+)
+metrics = metrics.merge(identity, on="player_display_name", how="left")
+
+# Clean + fill
+for c in metrics.columns:
+    if c != "player_display_name" and c not in ["Position", "Team"]:
+        metrics[c] = pd.to_numeric(metrics[c], errors="coerce").fillna(0)
+
+metrics["Player"] = metrics["player_display_name"]
+metrics["Position"] = metrics["Position"].astype(str).str.upper().str.strip()
+metrics["Team"] = metrics["Team"].fillna("")
+
+# Keep only DK roster positions
+metrics = metrics[metrics["Position"].isin(["QB", "RB", "WR", "TE"])].copy()
+
+# Deterministic demo salaries (until you plug DK salaries)
+# (No $ in the column name to avoid your prior error)
+def deterministic_salary(player_key: str, pos: str, seed_tag: str) -> int:
+    ranges = {"QB": (5200, 8800), "RB": (4000, 9200), "WR": (3000, 9000), "TE": (2500, 7800), "DST": (2000, 4500)}
+    lo, hi = ranges.get(pos, (3000, 8000))
+    # stable-ish hash
+    h = abs(hash(f"{seed_tag}:{pos}:{player_key}")) % (10**9)
+    val = lo + (h % (hi - lo + 1))
+    return int(round(val / 100) * 100)
+
+seed_tag = f"{season}-W{up_to_week}"
+metrics["player_key"] = metrics["Player"].apply(normalize_name)
+metrics["Salary"] = metrics.apply(lambda r: deterministic_salary(r["player_key"], r["Position"], seed_tag), axis=1)
+
+# Derived metrics (1 decimal where applicable)
+metrics["Avg_Last3"] = metrics[["Pts_L1", "Pts_L2", "Pts_L3"]].mean(axis=1).round(1)
+metrics["Value_per_1k"] = (metrics["Avg_Last3"] / (metrics["Salary"] / 1000)).replace([np.inf, -np.inf], 0).fillna(0).round(1)
+metrics["Last3_Spark"] = metrics.apply(lambda r: sparkline([r["Pts_L1"], r["Pts_L2"], r["Pts_L3"]]), axis=1)
+metrics["Trend"] = metrics.apply(lambda r: trend_arrow(r["Pts_L1"], r["Pts_L2"], r["Pts_L3"]), axis=1)
+
+df = metrics[
+    ["Player", "Position", "Team", "Salary", "PPG_Season", "Pts_L1", "Pts_L2", "Pts_L3",
+     "PassYds_L1", "PassYds_L2", "PassYds_L3",
+     "PassTD_L1", "PassTD_L2", "PassTD_L3",
+     "RushYds_L1", "RushYds_L2", "RushYds_L3",
+     "RecYds_L1", "RecYds_L2", "RecYds_L3",
+     "Rec_L1", "Rec_L2", "Rec_L3",
+     "Avg_Last3", "Value_per_1k", "Last3_Spark", "Trend"]
+].copy()
 
 st.caption(
-    "DraftKings scoring only. "
-    "Last-3 games shown oldest → newest (trend-correct). "
-    "Data sourced via nflreadpy (same pipeline as betting analyzer)."
+    f"Season {season}: data through Week {latest_week}. "
+    f"Last-3 shows last 3 games played before Week {up_to_week}."
+)
+
+# -----------------------------
+# Roster config (DraftKings-style)
+# -----------------------------
+salary_cap = 50000
+slots = [
+    ("QB", ["QB"]),
+    ("RB1", ["RB"]),
+    ("RB2", ["RB"]),
+    ("WR1", ["WR"]),
+    ("WR2", ["WR"]),
+    ("WR3", ["WR"]),
+    ("TE", ["TE"]),
+    ("FLEX", ["RB", "WR", "TE"]),
+    # DST kept as placeholder until you add team defense stats
+    ("DST", ["DST"]),
+]
+slot_names = [s[0] for s in slots]
+
+# Add a small DST pool (placeholder)
+dst_pool = pd.DataFrame({
+    "Player": ["49ers DST", "Cowboys DST", "Eagles DST", "Chiefs DST"],
+    "Position": ["DST", "DST", "DST", "DST"],
+    "Team": ["SF", "DAL", "PHI", "KC"],
+})
+dst_pool["Salary"] = [3200, 3500, 3300, 3400]
+dst_pool["PPG_Season"] = 0.0
+dst_pool["Pts_L1"] = dst_pool["Pts_L2"] = dst_pool["Pts_L3"] = 0.0
+dst_pool["PassYds_L1"] = dst_pool["PassYds_L2"] = dst_pool["PassYds_L3"] = 0.0
+dst_pool["PassTD_L1"] = dst_pool["PassTD_L2"] = dst_pool["PassTD_L3"] = 0.0
+dst_pool["RushYds_L1"] = dst_pool["RushYds_L2"] = dst_pool["RushYds_L3"] = 0.0
+dst_pool["RecYds_L1"] = dst_pool["RecYds_L2"] = dst_pool["RecYds_L3"] = 0.0
+dst_pool["Rec_L1"] = dst_pool["Rec_L2"] = dst_pool["Rec_L3"] = 0.0
+dst_pool["Avg_Last3"] = 0.0
+dst_pool["Value_per_1k"] = 0.0
+dst_pool["Last3_Spark"] = "▁▁▁"
+dst_pool["Trend"] = "→"
+
+df_all = pd.concat([df, dst_pool[df.columns]], ignore_index=True)
+
+# Ensure session_state keys exist
+for slot_name, _ in slots:
+    st.session_state.setdefault(f"slot_{slot_name}", "—")
+
+def get_selected_players():
+    selected = []
+    for slot_name in slot_names:
+        val = st.session_state.get(f"slot_{slot_name}", "—")
+        if val and val != "—":
+            selected.append(val)
+    return selected
+
+# -----------------------------
+# Sidebar: Roster Builder
+# -----------------------------
+with st.sidebar:
+    st.markdown("## 🧩 Roster Builder")
+    st.caption("DraftKings-style demo roster")
+
+    selected_now = get_selected_players()
+
+    for slot_name, allowed_positions in slots:
+        pool_slot = df_all[df_all["Position"].isin(allowed_positions)].copy()
+
+        current_val = st.session_state.get(f"slot_{slot_name}", "—")
+        exclude = set(selected_now)
+        if current_val != "—":
+            exclude.discard(current_val)
+        pool_slot = pool_slot[~pool_slot["Player"].isin(exclude)]
+
+        # Dropdown label (compact but informative)
+        pool_slot["Label"] = pool_slot.apply(
+            lambda r: f'{r["Player"]} ({r["Team"]}) — ${int(r["Salary"]):,} — {r["Trend"]} V {r["Value_per_1k"]:.1f}',
+            axis=1
+        )
+
+        label_to_player = dict(zip(pool_slot["Label"], pool_slot["Player"]))
+        player_to_label = {v: k for k, v in label_to_player.items()}
+
+        options = ["—"] + pool_slot["Label"].tolist()
+
+        default_label = "—"
+        if current_val != "—" and current_val in player_to_label:
+            default_label = player_to_label[current_val]
+
+        picked_label = st.selectbox(
+            slot_name,
+            options,
+            index=options.index(default_label) if default_label in options else 0,
+            key=f"ui_{slot_name}",
+        )
+
+        st.session_state[f"slot_{slot_name}"] = label_to_player.get(picked_label, "—")
+
+    chosen_players = get_selected_players()
+    total_salary = int(df_all[df_all["Player"].isin(chosen_players)]["Salary"].sum()) if chosen_players else 0
+
+    st.markdown("---")
+    st.metric("Salary Used", f"${total_salary:,}")
+    st.metric("Remaining", f"${salary_cap - total_salary:,}")
+
+    if total_salary > salary_cap:
+        st.error("Over the $50,000 salary cap. Try swapping to lower-cost players.")
+
+    if st.button("Reset Lineup"):
+        for slot_name in slot_names:
+            st.session_state[f"slot_{slot_name}"] = "—"
+            st.session_state[f"ui_{slot_name}"] = "—"
+        st.rerun()
+
+# -----------------------------
+# Main: Selected lineup summary
+# -----------------------------
+chosen_players = get_selected_players()
+
+st.markdown("## ✅ Selected Lineup")
+if chosen_players:
+    lineup_df = df_all[df_all["Player"].isin(chosen_players)][
+        ["Player", "Position", "Team", "Salary", "PPG_Season", "Trend", "Last3_Spark", "Avg_Last3", "Value_per_1k"]
+    ].copy()
+
+    lineup_df = lineup_df.rename(columns={
+        "PPG_Season": "SeasonAvg(DK)",
+        "Avg_Last3": "Last3Avg(DK)",
+        "Value_per_1k": "Value/$1k",
+    })
+
+    st.dataframe(lineup_df, use_container_width=True, hide_index=True)
+else:
+    st.caption("Use the sidebar to build a lineup, then browse the pool for details.")
+
+st.markdown("---")
+
+# -----------------------------
+# Main: Player Pool
+# -----------------------------
+st.markdown("## 🧾 Player Pool")
+
+c1, c2, c3 = st.columns([1, 1, 2])
+with c1:
+    pos_filter = st.selectbox("Position", ["ALL", "QB", "RB", "WR", "TE", "DST"], index=0)
+with c2:
+    team_filter = st.selectbox("Team", ["ALL"] + sorted(df_all["Team"].dropna().unique().tolist()))
+with c3:
+    search = st.text_input("Search player name", value="").strip().lower()
+
+pool_df = df_all.copy()
+if pos_filter != "ALL":
+    pool_df = pool_df[pool_df["Position"] == pos_filter]
+if team_filter != "ALL":
+    pool_df = pool_df[pool_df["Team"] == team_filter]
+if search:
+    pool_df = pool_df[pool_df["Player"].str.lower().str.contains(search)]
+
+display_cols = ["Player", "Position", "Team", "Salary", "PPG_Season", "Trend", "Last3_Spark", "Avg_Last3", "Value_per_1k"]
+# Sort: by pos then value
+pool_view = pool_df[display_cols].sort_values(["Position", "Value_per_1k"], ascending=[True, False]).copy()
+
+pool_view = pool_view.rename(columns={
+    "PPG_Season": "SeasonAvg(DK)",
+    "Avg_Last3": "Last3Avg(DK)",
+    "Value_per_1k": "Value/$1k",
+})
+
+st.data_editor(pool_view, use_container_width=True, hide_index=True, disabled=True)
+
+# -----------------------------
+# Main: Player Details
+# -----------------------------
+st.markdown("## 🔎 Player Details")
+
+if pool_df.empty:
+    st.warning("No players found for this filter/search.")
+    st.stop()
+
+detail_player = st.selectbox(
+    "Select a player from this pool",
+    pool_df["Player"].tolist(),
+    key="detail_player",
+)
+
+row = df_all[df_all["Player"] == detail_player].iloc[0]
+pos = row["Position"]
+
+st.markdown(f"#### {row['Player']} ({pos}) — {row['Team']}")
+
+m1, m2, m3, m4, m5 = st.columns(5)
+m1.metric("Salary", f"${int(row['Salary']):,}")
+m2.metric("Season Avg (DK)", f"{safe_num(row['PPG_Season']):.1f}")
+m3.metric("Avg Last 3 (DK)", f"{safe_num(row['Avg_Last3']):.1f}")
+m4.metric("Value / $1k", f"{safe_num(row['Value_per_1k']):.1f}")
+m5.metric("Trend", f"{row['Trend']}")
+
+# Last 3 fantasy points
+st.markdown("**Last 3 Fantasy Points (DK calc)**")
+pts_df = pd.DataFrame({
+    "Game": ["L1", "L2", "L3"],
+    "DK_Points": [safe_num(row["Pts_L1"]), safe_num(row["Pts_L2"]), safe_num(row["Pts_L3"])],
+})
+st.dataframe(pts_df, use_container_width=True, hide_index=True)
+st.line_chart(pts_df.set_index("Game")["DK_Points"])
+
+# Position-specific breakdown
+st.markdown("**Last 3 Stat Breakdown**")
+
+if pos == "QB":
+    detail_df = pd.DataFrame({
+        "Game": ["L1", "L2", "L3"],
+        "PassYds": [safe_num(row["PassYds_L1"]), safe_num(row["PassYds_L2"]), safe_num(row["PassYds_L3"])],
+        "PassTD":  [safe_num(row["PassTD_L1"]),  safe_num(row["PassTD_L2"]),  safe_num(row["PassTD_L3"])],
+        "RushYds": [safe_num(row["RushYds_L1"]), safe_num(row["RushYds_L2"]), safe_num(row["RushYds_L3"])],
+        "DK_Points": [safe_num(row["Pts_L1"]), safe_num(row["Pts_L2"]), safe_num(row["Pts_L3"])],
+    })
+elif pos in ["RB", "WR", "TE"]:
+    detail_df = pd.DataFrame({
+        "Game": ["L1", "L2", "L3"],
+        "RushYds": [safe_num(row["RushYds_L1"]), safe_num(row["RushYds_L2"]), safe_num(row["RushYds_L3"])],
+        "Receptions": [safe_num(row["Rec_L1"]), safe_num(row["Rec_L2"]), safe_num(row["Rec_L3"])],
+        "RecYds": [safe_num(row["RecYds_L1"]), safe_num(row["RecYds_L2"]), safe_num(row["RecYds_L3"])],
+        "DK_Points": [safe_num(row["Pts_L1"]), safe_num(row["Pts_L2"]), safe_num(row["Pts_L3"])],
+    })
+else:  # DST placeholder
+    detail_df = pd.DataFrame({
+        "Game": ["L1", "L2", "L3"],
+        "DK_Points": [safe_num(row["Pts_L1"]), safe_num(row["Pts_L2"]), safe_num(row["Pts_L3"])],
+    })
+
+st.dataframe(detail_df, use_container_width=True, hide_index=True)
+
+st.caption(
+    "DK points are computed in-app from weekly stat columns (1 decimal). "
+    "Salaries are demo placeholders until you connect real DraftKings salaries."
 )
