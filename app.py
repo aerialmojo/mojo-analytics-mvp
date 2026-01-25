@@ -102,17 +102,26 @@ def nflverse_weekly_url(season: int) -> str:
 
 @st.cache_data(ttl=86400)
 def season_exists(season: int) -> bool:
+    """
+    More reliable than HEAD: do a tiny GET using Range.
+    GitHub release assets sometimes behave oddly for HEAD requests.
+    """
     url = nflverse_weekly_url(season)
     try:
-        r = requests.head(url, timeout=15, allow_redirects=True)
-        return r.status_code == 200
+        r = requests.get(
+            url,
+            headers={"Range": "bytes=0-1024"},
+            timeout=20,
+            allow_redirects=True
+        )
+        return r.status_code in (200, 206) and len(r.content) > 0
     except Exception:
         return False
 
 @st.cache_data(ttl=3600)
 def fetch_player_week_stats(season: int) -> pd.DataFrame:
     url = nflverse_weekly_url(season)
-    r = requests.get(url, timeout=30)
+    r = requests.get(url, timeout=40)
     r.raise_for_status()
     stats = pd.read_csv(pd.io.common.BytesIO(r.content))
 
@@ -152,6 +161,7 @@ def build_player_pool(stats: pd.DataFrame) -> pd.DataFrame:
         ["Player", "Position", "player_key"]
     ].copy()
 
+    # MVP DST list (defense-by-week stats can be added later)
     dst = pd.DataFrame({
         "Player": ["49ers DST", "Cowboys DST", "Eagles DST", "Chiefs DST"],
         "Position": ["DST", "DST", "DST", "DST"],
@@ -160,11 +170,9 @@ def build_player_pool(stats: pd.DataFrame) -> pd.DataFrame:
 
     return pd.concat([pool, dst], ignore_index=True)
 
-def build_last3_and_season_metrics(stats: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+def build_last3_and_season_metrics(stats: pd.DataFrame, up_to_week: int) -> tuple[pd.DataFrame, int]:
     """
-    Auto-detect latest week in the dataset and compute:
-    - last 3 games played
-    - season avg DK points
+    Compute last-3 games played + season average for games BEFORE up_to_week.
     Returns (metrics_df, latest_week_in_data)
     """
     s = stats.copy()
@@ -173,8 +181,11 @@ def build_last3_and_season_metrics(stats: pd.DataFrame) -> tuple[pd.DataFrame, i
         return pd.DataFrame(columns=["player_key"]), 0
 
     latest_week = int(s["week"].max())
-    up_to_week = latest_week + 1
-    s = s[s["week"] < up_to_week].copy()
+
+    # Only games before the selected week
+    s = s[s["week"] < int(up_to_week)].copy()
+    if s.empty:
+        return pd.DataFrame(columns=["player_key"]), latest_week
 
     s = s.sort_values(["player_key", "week"], ascending=[True, False])
     last3 = s.groupby("player_key").head(3).copy()
@@ -219,17 +230,29 @@ def build_last3_and_season_metrics(stats: pd.DataFrame) -> tuple[pd.DataFrame, i
 # Sidebar: Season dropdown (last 3 available seasons)
 # -----------------------------
 current_year = datetime.now().year
-candidate_years = list(range(current_year, current_year - 8, -1))  # search back
-available = [y for y in candidate_years if season_exists(y)]
+
+# Prefer last 3 seasons by label, but only include those that exist
+preferred = [current_year - 1, current_year - 2, current_year - 3]
+
+available = [y for y in preferred if season_exists(y)]
+
+# Fallback search if needed
+if len(available) < 3:
+    for y in range(current_year, current_year - 10, -1):
+        if y not in available and season_exists(y):
+            available.append(y)
+        if len(available) >= 3:
+            break
+
 if len(available) == 0:
     st.error("Could not find any available nflverse seasons right now.")
     st.stop()
 
-last3_seasons = available[:3]
+available = available[:3]  # show last 3 we found
 
 with st.sidebar:
     st.markdown("### 📅 Season")
-    season = st.selectbox("Choose season", last3_seasons, index=0)
+    season = st.selectbox("Choose season", available, index=0)
     st.caption("Stats are pulled automatically from nflverse weekly data (free).")
 
 # -----------------------------
@@ -243,7 +266,29 @@ except Exception as e:
     st.stop()
 
 pool = build_player_pool(stats)
-metrics, latest_week = build_last3_and_season_metrics(stats)
+
+# -----------------------------
+# Sidebar: Week slider (Latest or Choose)
+# -----------------------------
+latest_week = int(pd.to_numeric(stats["week"], errors="coerce").max())
+
+with st.sidebar:
+    st.markdown("### 🗓️ Week")
+    mode = st.radio("Last-3 mode", ["Latest available", "Choose a week"], index=0, horizontal=True)
+
+    if mode == "Latest available":
+        up_to_week = latest_week + 1
+        st.caption(f"Using last-3 games before Week {up_to_week} (latest in data: Week {latest_week}).")
+    else:
+        up_to_week = st.slider(
+            "Compute last-3 games before this week",
+            min_value=1,
+            max_value=latest_week + 1,
+            value=latest_week + 1,
+            step=1
+        )
+
+metrics, _latest_week_check = build_last3_and_season_metrics(stats, up_to_week=up_to_week)
 
 df = pool.merge(metrics, on="player_key", how="left")
 
@@ -262,8 +307,8 @@ for c in numeric_cols:
         df[c] = 0
     df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
-# Demo salaries (deterministic, season-based)
-seed_tag = f"{season}"
+# Demo salaries (deterministic, season+week-based so values shift a bit)
+seed_tag = f"{season}-W{up_to_week}"
 df["Salary"] = df.apply(lambda r: deterministic_salary(r["player_key"], r["Position"], seed_tag), axis=1)
 
 # Derived metrics
@@ -275,7 +320,10 @@ df["Last3_Spark"] = df.apply(lambda r: sparkline([r["Pts_L1"], r["Pts_L2"], r["P
 if "Team" not in df.columns:
     df["Team"] = ""
 
-st.caption(f"Season {season}: data detected through Week {latest_week}. Last-3 shows last 3 games played.")
+st.caption(
+    f"Season {season}: data detected through Week {latest_week}. "
+    f"Last-3 shows last 3 games played before Week {up_to_week}."
+)
 
 # -----------------------------
 # Roster config (DraftKings-style)
@@ -374,14 +422,14 @@ if chosen_players:
     ].copy()
     st.dataframe(lineup_df, use_container_width=True, hide_index=True)
 else:
-    st.caption("Use the sidebar to build a lineup, then browse the weekly pool for details.")
+    st.caption("Use the sidebar to build a lineup, then browse the pool for details.")
 
 st.markdown("---")
 
 # -----------------------------
 # Main: Player Pool
 # -----------------------------
-st.markdown("## 🧾 Player Pool (This Season)")
+st.markdown("## 🧾 Player Pool")
 
 c1, c2 = st.columns([1, 2])
 with c1:
