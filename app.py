@@ -1,9 +1,15 @@
 import re
 import hashlib
-import requests
+from datetime import datetime
+
 import streamlit as st
 import pandas as pd
-from datetime import datetime
+
+# nfl_data_py (free)
+try:
+    import nfl_data_py as nfl
+except Exception:
+    nfl = None
 
 # -----------------------------
 # Page config
@@ -59,23 +65,27 @@ def dk_fantasy_points(row: pd.Series) -> float:
     fum_lost = float(row.get("fumbles_lost", 0) or 0)
 
     pts = 0.0
+    # DK passing
     pts += pass_yds * 0.04
     pts += pass_td * 4.0
     pts += ints * -1.0
     if pass_yds >= 300:
         pts += 3.0
 
+    # DK rushing
     pts += rush_yds * 0.10
     pts += rush_td * 6.0
     if rush_yds >= 100:
         pts += 3.0
 
+    # DK receiving
     pts += rec * 1.0
     pts += rec_yds * 0.10
     pts += rec_td * 6.0
     if rec_yds >= 100:
         pts += 3.0
 
+    # fumbles lost
     pts += fum_lost * -1.0
     return round(pts, 2)
 
@@ -88,69 +98,50 @@ def deterministic_salary(player_key: str, pos: str, seed_tag: str) -> int:
         "DST": (2000, 4500),
     }
     lo, hi = ranges.get(pos, (3000, 8000))
-
     h = hashlib.md5(f"{seed_tag}:{pos}:{player_key}".encode("utf-8")).hexdigest()
     n = int(h[:8], 16)
     val = lo + (n % (hi - lo + 1))
     return int(round(val / 100) * 100)
 
 # -----------------------------
-# nflverse "free API" access
+# Data loading (nfl_data_py)
 # -----------------------------
-def nflverse_weekly_url(season: int) -> str:
-    return f"https://github.com/nflverse/nflverse-data/releases/download/player_stats/stats_player_week_{season}.csv"
-
-@st.cache_data(ttl=86400)
-def season_exists(season: int) -> bool:
-    """
-    More reliable than HEAD: do a tiny GET using Range.
-    GitHub release assets sometimes behave oddly for HEAD requests.
-    """
-    url = nflverse_weekly_url(season)
-    try:
-        r = requests.get(
-            url,
-            headers={"Range": "bytes=0-1024"},
-            timeout=20,
-            allow_redirects=True
-        )
-        return r.status_code in (200, 206) and len(r.content) > 0
-    except Exception:
-        return False
-
 @st.cache_data(ttl=3600)
 def fetch_player_week_stats(season: int) -> pd.DataFrame:
-    url = nflverse_weekly_url(season)
-    r = requests.get(url, timeout=40)
-    r.raise_for_status()
-    stats = pd.read_csv(pd.io.common.BytesIO(r.content))
+    if nfl is None:
+        raise RuntimeError("nfl_data_py is not installed. Add 'nfl-data-py' to requirements.txt")
 
-    # Normalize common alt column names
-    if "player_name" not in stats.columns:
+    df = nfl.import_weekly_data([season])
+
+    # Standardize expected columns
+    # Most nfl_data_py weekly datasets already use these names, but we guard anyway.
+    if "player_name" not in df.columns:
         for alt in ["player_display_name", "name", "player"]:
-            if alt in stats.columns:
-                stats = stats.rename(columns={alt: "player_name"})
+            if alt in df.columns:
+                df = df.rename(columns={alt: "player_name"})
                 break
 
-    if "week" not in stats.columns:
-        for alt in ["week_num", "game_week"]:
-            if alt in stats.columns:
-                stats = stats.rename(columns={alt: "week"})
-                break
-
-    if "position" not in stats.columns:
+    if "position" not in df.columns:
         for alt in ["pos"]:
-            if alt in stats.columns:
-                stats = stats.rename(columns={alt: "position"})
+            if alt in df.columns:
+                df = df.rename(columns={alt: "position"})
                 break
 
-    stats["player_name"] = stats["player_name"].astype(str)
-    stats["player_key"] = stats["player_name"].apply(normalize_name)
-    stats["position"] = stats["position"].astype(str).str.upper().str.strip()
-    stats["week"] = pd.to_numeric(stats["week"], errors="coerce")
+    # Ensure week exists
+    if "week" not in df.columns:
+        for alt in ["week_num", "game_week"]:
+            if alt in df.columns:
+                df = df.rename(columns={alt: "week"})
+                break
 
-    stats["dk_points"] = stats.apply(dk_fantasy_points, axis=1)
-    return stats
+    df["player_name"] = df["player_name"].astype(str)
+    df["player_key"] = df["player_name"].apply(normalize_name)
+    df["position"] = df["position"].astype(str).str.upper().str.strip()
+    df["week"] = pd.to_numeric(df["week"], errors="coerce")
+
+    # Compute DK points per row
+    df["dk_points"] = df.apply(dk_fantasy_points, axis=1)
+    return df
 
 def build_player_pool(stats: pd.DataFrame) -> pd.DataFrame:
     base = stats[["player_key", "player_name", "position"]].dropna().copy()
@@ -161,7 +152,7 @@ def build_player_pool(stats: pd.DataFrame) -> pd.DataFrame:
         ["Player", "Position", "player_key"]
     ].copy()
 
-    # MVP DST list (defense-by-week stats can be added later)
+    # MVP DST list (defense stats can be added later if you want)
     dst = pd.DataFrame({
         "Player": ["49ers DST", "Cowboys DST", "Eagles DST", "Chiefs DST"],
         "Position": ["DST", "DST", "DST", "DST"],
@@ -227,41 +218,24 @@ def build_last3_and_season_metrics(stats: pd.DataFrame, up_to_week: int) -> tupl
     return out, latest_week
 
 # -----------------------------
-# Sidebar: Season dropdown (last 3 available seasons)
+# Sidebar: Season dropdown (last 3 seasons)
 # -----------------------------
 current_year = datetime.now().year
-
-# Prefer last 3 seasons by label, but only include those that exist
-preferred = [current_year - 1, current_year - 2, current_year - 3]
-
-available = [y for y in preferred if season_exists(y)]
-
-# Fallback search if needed
-if len(available) < 3:
-    for y in range(current_year, current_year - 10, -1):
-        if y not in available and season_exists(y):
-            available.append(y)
-        if len(available) >= 3:
-            break
-
-if len(available) == 0:
-    st.error("Could not find any available nflverse seasons right now.")
-    st.stop()
-
-available = available[:3]  # show last 3 we found
+# In Jan 2026 this yields: 2025, 2024, 2023
+season_choices = [current_year - 1, current_year - 2, current_year - 3]
 
 with st.sidebar:
     st.markdown("### 📅 Season")
-    season = st.selectbox("Choose season", available, index=0)
-    st.caption("Stats are pulled automatically from nflverse weekly data (free).")
+    season = st.selectbox("Choose season", season_choices, index=0)
+    st.caption("Stats pulled automatically via nfl_data_py (free).")
 
 # -----------------------------
-# Build dataset for selected season
+# Load stats
 # -----------------------------
 try:
     stats = fetch_player_week_stats(int(season))
 except Exception as e:
-    st.error("Could not load nflverse weekly stats right now.")
+    st.error("Could not load weekly stats. Make sure 'nfl-data-py' is in requirements.txt.")
     st.code(str(e))
     st.stop()
 
@@ -289,7 +263,6 @@ with st.sidebar:
         )
 
 metrics, _latest_week_check = build_last3_and_season_metrics(stats, up_to_week=up_to_week)
-
 df = pool.merge(metrics, on="player_key", how="left")
 
 # Fill missing numeric columns
@@ -307,7 +280,7 @@ for c in numeric_cols:
         df[c] = 0
     df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
-# Demo salaries (deterministic, season+week-based so values shift a bit)
+# Demo salaries (deterministic)
 seed_tag = f"{season}-W{up_to_week}"
 df["Salary"] = df.apply(lambda r: deterministic_salary(r["player_key"], r["Position"], seed_tag), axis=1)
 
@@ -316,9 +289,6 @@ df["Avg_Last3"] = df[["Pts_L1", "Pts_L2", "Pts_L3"]].mean(axis=1).round(2)
 df["Value_Last3_per_$1k"] = (df["Avg_Last3"] / (df["Salary"] / 1000)).replace([pd.NA, pd.NaT], 0).fillna(0).round(2)
 df["Value_Season_per_$1k"] = (df["PPG_Season"] / (df["Salary"] / 1000)).replace([pd.NA, pd.NaT], 0).fillna(0).round(2)
 df["Last3_Spark"] = df.apply(lambda r: sparkline([r["Pts_L1"], r["Pts_L2"], r["Pts_L3"]]), axis=1)
-
-if "Team" not in df.columns:
-    df["Team"] = ""
 
 st.caption(
     f"Season {season}: data detected through Week {latest_week}. "
@@ -508,6 +478,6 @@ else:
 st.dataframe(detail_df, use_container_width=True, hide_index=True)
 
 st.caption(
-    "Stats are pulled automatically from free nflverse weekly player data. "
+    "Stats are pulled automatically via nfl_data_py weekly data. "
     "DraftKings points are computed in-app. Salaries are deterministic demo values until you plug in real DK salaries."
 )
