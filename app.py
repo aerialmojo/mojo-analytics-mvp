@@ -1,15 +1,12 @@
 import re
 import hashlib
-from datetime import datetime
-
+import numpy as np
 import streamlit as st
 import pandas as pd
+from datetime import datetime
 
-# nfl_data_py (free)
-try:
-    import nfl_data_py as nfl
-except Exception:
-    nfl = None
+# nfl_data_py is installed via pip package "nfl-data-py"
+import nfl_data_py as nfl
 
 # -----------------------------
 # Page config
@@ -41,6 +38,7 @@ def normalize_name(s: str) -> str:
 
 def sparkline(vals):
     blocks = "▁▂▃▄▅▆▇█"
+    vals = [float(v or 0) for v in vals]
     vmin, vmax = min(vals), max(vals)
     if vmax == vmin:
         return blocks[3] * len(vals)
@@ -51,6 +49,7 @@ def sparkline(vals):
     return out
 
 def dk_fantasy_points(row: pd.Series) -> float:
+    # DraftKings (classic) core scoring for offense
     pass_yds = float(row.get("passing_yards", 0) or 0)
     pass_td  = float(row.get("passing_tds", 0) or 0)
     ints     = float(row.get("interceptions", 0) or 0)
@@ -65,27 +64,23 @@ def dk_fantasy_points(row: pd.Series) -> float:
     fum_lost = float(row.get("fumbles_lost", 0) or 0)
 
     pts = 0.0
-    # DK passing
     pts += pass_yds * 0.04
     pts += pass_td * 4.0
     pts += ints * -1.0
     if pass_yds >= 300:
         pts += 3.0
 
-    # DK rushing
     pts += rush_yds * 0.10
     pts += rush_td * 6.0
     if rush_yds >= 100:
         pts += 3.0
 
-    # DK receiving
     pts += rec * 1.0
     pts += rec_yds * 0.10
     pts += rec_td * 6.0
     if rec_yds >= 100:
         pts += 3.0
 
-    # fumbles lost
     pts += fum_lost * -1.0
     return round(pts, 2)
 
@@ -103,48 +98,107 @@ def deterministic_salary(player_key: str, pos: str, seed_tag: str) -> int:
     val = lo + (n % (hi - lo + 1))
     return int(round(val / 100) * 100)
 
-# -----------------------------
-# Data loading (nfl_data_py)
-# -----------------------------
-@st.cache_data(ttl=3600)
-def fetch_player_week_stats(season: int) -> pd.DataFrame:
-    if nfl is None:
-        raise RuntimeError("nfl_data_py is not installed. Add 'nfl-data-py' to requirements.txt")
-
-    df = nfl.import_weekly_data([season])
-
-    # Standardize expected columns
-    # Most nfl_data_py weekly datasets already use these names, but we guard anyway.
-    if "player_name" not in df.columns:
-        for alt in ["player_display_name", "name", "player"]:
-            if alt in df.columns:
-                df = df.rename(columns={alt: "player_name"})
-                break
-
-    if "position" not in df.columns:
-        for alt in ["pos"]:
-            if alt in df.columns:
-                df = df.rename(columns={alt: "position"})
-                break
-
-    # Ensure week exists
-    if "week" not in df.columns:
-        for alt in ["week_num", "game_week"]:
-            if alt in df.columns:
-                df = df.rename(columns={alt: "week"})
-                break
-
-    df["player_name"] = df["player_name"].astype(str)
-    df["player_key"] = df["player_name"].apply(normalize_name)
-    df["position"] = df["position"].astype(str).str.upper().str.strip()
-    df["week"] = pd.to_numeric(df["week"], errors="coerce")
-
-    # Compute DK points per row
-    df["dk_points"] = df.apply(dk_fantasy_points, axis=1)
+def coerce_numeric(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    for c in cols:
+        if c not in df.columns:
+            df[c] = 0
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
     return df
 
-def build_player_pool(stats: pd.DataFrame) -> pd.DataFrame:
-    base = stats[["player_key", "player_name", "position"]].dropna().copy()
+# -----------------------------
+# Data loading via nfl_data_py (free)
+# -----------------------------
+@st.cache_data(ttl=3600)
+def fetch_weekly(season: int) -> pd.DataFrame:
+    # nfl.import_weekly_data returns player-week game logs with many stats
+    weekly = nfl.import_weekly_data([season])
+
+    # Normalize expected columns across versions
+    rename_map = {}
+    if "player_display_name" in weekly.columns and "player_name" not in weekly.columns:
+        rename_map["player_display_name"] = "player_name"
+    if "recent_team" in weekly.columns and "team" not in weekly.columns:
+        rename_map["recent_team"] = "team"
+    if rename_map:
+        weekly = weekly.rename(columns=rename_map)
+
+    # Required columns
+    needed = ["season", "week", "player_name", "position"]
+    missing = [c for c in needed if c not in weekly.columns]
+    if missing:
+        raise ValueError(f"Weekly data missing columns: {missing}")
+
+    weekly["player_name"] = weekly["player_name"].astype(str)
+    weekly["player_key"] = weekly["player_name"].apply(normalize_name)
+    weekly["position"] = weekly["position"].astype(str).str.upper().str.strip()
+    weekly["week"] = pd.to_numeric(weekly["week"], errors="coerce")
+
+    # standard stat cols (some may not exist; we’ll coerce later)
+    return weekly
+
+def build_metrics(weekly: pd.DataFrame, up_to_week: int) -> tuple[pd.DataFrame, int]:
+    """
+    Computes:
+      - last 3 games played before up_to_week
+      - season avg DK points before up_to_week
+    Returns (metrics_df, latest_week_in_data)
+    """
+    w = weekly.copy()
+    w = w[w["week"].notna()].copy()
+    if w.empty:
+        return pd.DataFrame(columns=["player_key"]), 0
+
+    latest_week = int(w["week"].max())
+
+    # keep offensive positions for now
+    w = w[w["position"].isin(["QB", "RB", "WR", "TE"])].copy()
+
+    # Coerce likely stat columns (these exist in nfl_data_py weekly)
+    stat_cols = [
+        "passing_yards","passing_tds","interceptions",
+        "rushing_yards","rushing_tds",
+        "receiving_yards","receiving_tds","receptions",
+        "fumbles_lost",
+    ]
+    w = coerce_numeric(w, stat_cols)
+
+    # DK points computed from stats
+    w["dk_points"] = w.apply(dk_fantasy_points, axis=1)
+
+    # Only games before selected week
+    w = w[w["week"] < int(up_to_week)].copy()
+    if w.empty:
+        return pd.DataFrame(columns=["player_key"]), latest_week
+
+    # Sort so "last 3 played" is by week desc per player
+    w = w.sort_values(["player_key", "week"], ascending=[True, False])
+    last3 = w.groupby("player_key").head(3).copy()
+    last3["rank"] = last3.groupby("player_key").cumcount() + 1
+
+    def pivot(col, pref):
+        p = last3.pivot_table(index="player_key", columns="rank", values=col, aggfunc="first")
+        return p.rename(columns={1: f"{pref}_L1", 2: f"{pref}_L2", 3: f"{pref}_L3"}).reset_index()
+
+    out = pivot("dk_points", "Pts")
+
+    out = out.merge(pivot("passing_yards", "PassYds"), on="player_key", how="left")
+    out = out.merge(pivot("passing_tds", "PassTD"), on="player_key", how="left")
+    out = out.merge(pivot("rushing_yards", "RushYds"), on="player_key", how="left")
+    out = out.merge(pivot("receiving_yards", "RecYds"), on="player_key", how="left")
+    out = out.merge(pivot("receptions", "Rec"), on="player_key", how="left")
+
+    season_avg = (
+        w.groupby("player_key")["dk_points"]
+        .mean()
+        .reset_index()
+        .rename(columns={"dk_points": "PPG_Season"})
+    )
+    out = out.merge(season_avg, on="player_key", how="left")
+
+    return out, latest_week
+
+def build_player_pool(weekly: pd.DataFrame) -> pd.DataFrame:
+    base = weekly[["player_key", "player_name", "position"]].dropna().copy()
     base = base[base["position"].isin(["QB", "RB", "WR", "TE"])].copy()
     base = base.drop_duplicates(subset=["player_key"], keep="first")
 
@@ -152,7 +206,7 @@ def build_player_pool(stats: pd.DataFrame) -> pd.DataFrame:
         ["Player", "Position", "player_key"]
     ].copy()
 
-    # MVP DST list (defense stats can be added later if you want)
+    # MVP DST (you can later add real DST stats)
     dst = pd.DataFrame({
         "Player": ["49ers DST", "Cowboys DST", "Eagles DST", "Chiefs DST"],
         "Position": ["DST", "DST", "DST", "DST"],
@@ -161,137 +215,103 @@ def build_player_pool(stats: pd.DataFrame) -> pd.DataFrame:
 
     return pd.concat([pool, dst], ignore_index=True)
 
-def build_last3_and_season_metrics(stats: pd.DataFrame, up_to_week: int) -> tuple[pd.DataFrame, int]:
-    """
-    Compute last-3 games played + season average for games BEFORE up_to_week.
-    Returns (metrics_df, latest_week_in_data)
-    """
-    s = stats.copy()
-    s = s[s["week"].notna()].copy()
-    if s.empty:
-        return pd.DataFrame(columns=["player_key"]), 0
-
-    latest_week = int(s["week"].max())
-
-    # Only games before the selected week
-    s = s[s["week"] < int(up_to_week)].copy()
-    if s.empty:
-        return pd.DataFrame(columns=["player_key"]), latest_week
-
-    s = s.sort_values(["player_key", "week"], ascending=[True, False])
-    last3 = s.groupby("player_key").head(3).copy()
-    last3["rank"] = last3.groupby("player_key").cumcount() + 1
-
-    def pivot(col, pref):
-        if col not in last3.columns:
-            return None
-        p = last3.pivot_table(index="player_key", columns="rank", values=col, aggfunc="first")
-        return p.rename(columns={1: f"{pref}_L1", 2: f"{pref}_L2", 3: f"{pref}_L3"}).reset_index()
-
-    out = pivot("dk_points", "Pts")
-    if out is None:
-        out = pd.DataFrame({"player_key": s["player_key"].unique()})
-
-    for col, pref in [
-        ("passing_yards", "PassYds"),
-        ("passing_tds", "PassTD"),
-        ("rushing_yards", "RushYds"),
-        ("receiving_yards", "RecYds"),
-        ("receptions", "Rec"),
-    ]:
-        p = pivot(col, pref)
-        if p is not None:
-            out = out.merge(p, on="player_key", how="left")
-
-    season_avg = (
-        s.groupby("player_key")["dk_points"]
-        .mean()
-        .reset_index()
-        .rename(columns={"dk_points": "PPG_Season"})
-    )
-    out = out.merge(season_avg, on="player_key", how="left")
-
-    for c in out.columns:
-        if c != "player_key":
-            out[c] = pd.to_numeric(out[c], errors="coerce")
-
-    return out, latest_week
-
 # -----------------------------
-# Sidebar: Season dropdown (last 3 seasons)
+# Season picker (last 3 seasons, include 2025)
 # -----------------------------
-current_year = datetime.now().year
-# In Jan 2026 this yields: 2025, 2024, 2023
-season_choices = [current_year - 1, current_year - 2, current_year - 3]
+current_year = datetime.now().year  # 2026 right now
+preferred = [current_year - 1, current_year - 2, current_year - 3]  # 2025, 2024, 2023
+
+available = []
+for y in preferred:
+    try:
+        _ = fetch_weekly(int(y))
+        available.append(int(y))
+    except Exception:
+        pass
+
+# If something weird happens, backfill
+if len(available) < 3:
+    for y in range(current_year - 4, current_year - 11, -1):
+        if len(available) >= 3:
+            break
+        try:
+            _ = fetch_weekly(int(y))
+            available.append(int(y))
+        except Exception:
+            continue
+
+if not available:
+    st.error("Could not load any seasons right now from nfl_data_py.")
+    st.stop()
+
+available = available[:3]
 
 with st.sidebar:
     st.markdown("### 📅 Season")
-    season = st.selectbox("Choose season", season_choices, index=0)
+    season = st.selectbox("Choose season", available, index=0)
     st.caption("Stats pulled automatically via nfl_data_py (free).")
 
 # -----------------------------
-# Load stats
+# Load weekly data for season
 # -----------------------------
 try:
-    stats = fetch_player_week_stats(int(season))
+    weekly = fetch_weekly(int(season))
 except Exception as e:
-    st.error("Could not load weekly stats. Make sure 'nfl-data-py' is in requirements.txt.")
+    st.error("Could not load weekly stats. Check that nfl-data-py installed properly.")
     st.code(str(e))
     st.stop()
 
-pool = build_player_pool(stats)
+latest_week_in_data = int(pd.to_numeric(weekly["week"], errors="coerce").max())
 
 # -----------------------------
-# Sidebar: Week slider (Latest or Choose)
+# Week mode (latest vs choose)
 # -----------------------------
-latest_week = int(pd.to_numeric(stats["week"], errors="coerce").max())
-
 with st.sidebar:
     st.markdown("### 🗓️ Week")
     mode = st.radio("Last-3 mode", ["Latest available", "Choose a week"], index=0, horizontal=True)
 
     if mode == "Latest available":
-        up_to_week = latest_week + 1
-        st.caption(f"Using last-3 games before Week {up_to_week} (latest in data: Week {latest_week}).")
+        up_to_week = latest_week_in_data + 1
+        st.caption(f"Using last-3 games before Week {up_to_week} (latest in data: Week {latest_week_in_data}).")
     else:
         up_to_week = st.slider(
             "Compute last-3 games before this week",
             min_value=1,
-            max_value=latest_week + 1,
-            value=latest_week + 1,
-            step=1
+            max_value=latest_week_in_data + 1,
+            value=latest_week_in_data + 1,
+            step=1,
         )
 
-metrics, _latest_week_check = build_last3_and_season_metrics(stats, up_to_week=up_to_week)
+# Build pool + metrics
+pool = build_player_pool(weekly)
+metrics, latest_week_confirm = build_metrics(weekly, up_to_week=up_to_week)
+
 df = pool.merge(metrics, on="player_key", how="left")
 
-# Fill missing numeric columns
+# Fill / coerce numeric fields
 numeric_cols = [
-    "Pts_L1", "Pts_L2", "Pts_L3",
-    "PassYds_L1", "PassYds_L2", "PassYds_L3",
-    "PassTD_L1", "PassTD_L2", "PassTD_L3",
-    "RushYds_L1", "RushYds_L2", "RushYds_L3",
-    "RecYds_L1", "RecYds_L2", "RecYds_L3",
-    "Rec_L1", "Rec_L2", "Rec_L3",
+    "Pts_L1","Pts_L2","Pts_L3",
+    "PassYds_L1","PassYds_L2","PassYds_L3",
+    "PassTD_L1","PassTD_L2","PassTD_L3",
+    "RushYds_L1","RushYds_L2","RushYds_L3",
+    "RecYds_L1","RecYds_L2","RecYds_L3",
+    "Rec_L1","Rec_L2","Rec_L3",
     "PPG_Season",
 ]
-for c in numeric_cols:
-    if c not in df.columns:
-        df[c] = 0
-    df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+df = coerce_numeric(df, numeric_cols)
 
-# Demo salaries (deterministic)
+# Demo salary (until DK salary ingestion is added)
 seed_tag = f"{season}-W{up_to_week}"
 df["Salary"] = df.apply(lambda r: deterministic_salary(r["player_key"], r["Position"], seed_tag), axis=1)
 
 # Derived metrics
-df["Avg_Last3"] = df[["Pts_L1", "Pts_L2", "Pts_L3"]].mean(axis=1).round(2)
-df["Value_Last3_per_$1k"] = (df["Avg_Last3"] / (df["Salary"] / 1000)).replace([pd.NA, pd.NaT], 0).fillna(0).round(2)
-df["Value_Season_per_$1k"] = (df["PPG_Season"] / (df["Salary"] / 1000)).replace([pd.NA, pd.NaT], 0).fillna(0).round(2)
+df["Avg_Last3"] = df[["Pts_L1","Pts_L2","Pts_L3"]].mean(axis=1).round(2)
+df["Value_Last3_per_$1k"] = (df["Avg_Last3"] / (df["Salary"] / 1000)).replace([np.inf, -np.inf], 0).fillna(0).round(2)
+df["Value_Season_per_$1k"] = (df["PPG_Season"] / (df["Salary"] / 1000)).replace([np.inf, -np.inf], 0).fillna(0).round(2)
 df["Last3_Spark"] = df.apply(lambda r: sparkline([r["Pts_L1"], r["Pts_L2"], r["Pts_L3"]]), axis=1)
 
 st.caption(
-    f"Season {season}: data detected through Week {latest_week}. "
+    f"Season {season}: weekly data detected through Week {latest_week_in_data}. "
     f"Last-3 shows last 3 games played before Week {up_to_week}."
 )
 
@@ -359,7 +379,7 @@ with st.sidebar:
             slot_name,
             options,
             index=options.index(default_label) if default_label in options else 0,
-            key=f"ui_{slot_name}"
+            key=f"ui_{slot_name}",
         )
 
         st.session_state[f"slot_{slot_name}"] = label_to_player.get(picked_label, "—")
@@ -430,7 +450,7 @@ if pool_df.empty:
 detail_player = st.selectbox(
     "Select a player from this pool",
     pool_df["Player"].tolist(),
-    key="detail_player"
+    key="detail_player",
 )
 
 row = df[df["Player"] == detail_player].iloc[0]
@@ -478,6 +498,6 @@ else:
 st.dataframe(detail_df, use_container_width=True, hide_index=True)
 
 st.caption(
-    "Stats are pulled automatically via nfl_data_py weekly data. "
+    "Stats are pulled automatically via nfl_data_py weekly game logs (free). "
     "DraftKings points are computed in-app. Salaries are deterministic demo values until you plug in real DK salaries."
 )
