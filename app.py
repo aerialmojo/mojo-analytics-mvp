@@ -139,7 +139,7 @@ df[["L1","L2","L3"]] = df[["L1","L2","L3"]].fillna(0).round(1)
 df["Avg_Last3"] = df[["L1","L2","L3"]].mean(axis=1).round(1)
 df["Last3_Spark"] = df.apply(lambda r: sparkline([r.L1,r.L2,r.L3]), axis=1)
 df["Salary"] = df.apply(lambda r: salary(r.player_key,r.Position,f"{season}-{up_to_week}"), axis=1)
-df["Value_per_$1k"] = (df.Avg_Last3 / (df.Salary/1000)).round(1)
+df["Value_per_1k"] = (df.Avg_Last3 / (df.Salary/1000)).round(1)
 
 # -----------------------------
 # UI: Player Pool
@@ -147,8 +147,8 @@ df["Value_per_$1k"] = (df.Avg_Last3 / (df.Salary/1000)).round(1)
 st.markdown("## 🧾 Player Pool")
 
 pool_view = df[
-    ["Player","Position","Salary","PPG_Season","Last3_Spark","Avg_Last3","Value_per_$1k"]
-].sort_values("Value_per_$1k", ascending=False)
+    ["Player","Position","Salary","PPG_Season","Last3_Spark","Avg_Last3","Value_per_1k"]
+].sort_values("Value_per_1k", ascending=False)
 
 st.dataframe(pool_view, use_container_width=True, hide_index=True)
 
@@ -162,7 +162,7 @@ row = df[df.Player == player].iloc[0]
 
 st.metric("Season Avg (DK)", row.PPG_Season)
 st.metric("Last 3 Avg (DK)", row.Avg_Last3)
-st.metric("Value / $1k", row.Value_per_$1k)
+st.metric("Value / $1k", row.Value_per_1k)
 
 pts_df = pd.DataFrame({
     "Game": ["L1","L2","L3"],
