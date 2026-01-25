@@ -1,9 +1,4 @@
 # app.py — Mojo Analytics (NFL) — Streamlit
-# - Pulls weekly player stats via nfl-data-py (nflreadpy)
-# - Builds DraftKings-style roster builder in sidebar
-# - Shows player pool + details w/ last-3 game breakdown
-# - Adds trend arrows (up / down / flat) for DK points last-3
-#
 # Requirements (requirements.txt):
 # streamlit>=1.37,<2
 # pandas>=2.1,<3
@@ -15,8 +10,9 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-# If you keep data_utils.py in the repo:
-from data_utils import load_player_stats  # uses nflreadpy (nfl-data-py)
+# If you have data_utils.py in your repo (recommended):
+from data_utils import load_player_stats
+
 
 # -----------------------------
 # Page config
@@ -62,12 +58,9 @@ def sparkline(vals):
 
 
 def trend_arrow(v1, v2, v3, flat_eps: float = 0.75) -> str:
-    """
-    Simple trend: compare last to first of the 3.
-    - flat_eps controls how much change counts as "flat".
-    """
+    """Compare L3 to L1; small delta treated as flat."""
     try:
-        a, b, c = float(v1), float(v2), float(v3)
+        a, c = float(v1), float(v3)
     except Exception:
         return "→"
     delta = c - a
@@ -76,25 +69,30 @@ def trend_arrow(v1, v2, v3, flat_eps: float = 0.75) -> str:
     return "↑" if delta > 0 else "↓"
 
 
-def safe_num(series_or_val, default=0.0):
-    try:
-        if pd.isna(series_or_val):
-            return default
-        return float(series_or_val)
-    except Exception:
-        return default
+def ensure_column(df: pd.DataFrame, target: str, fallbacks: list[str], default_val=""):
+    """
+    Ensure df[target] exists. If not, copy from first existing fallback,
+    otherwise set to default_val.
+    """
+    if target in df.columns:
+        return df
+    for fb in fallbacks:
+        if fb in df.columns:
+            df[target] = df[fb]
+            return df
+    df[target] = default_val
+    return df
 
 
 def compute_dk_points(df: pd.DataFrame) -> pd.Series:
     """
-    DK scoring (simplified but practical for skill players/QBs):
+    DK scoring (practical, 1-decimal):
       Passing: 0.04/yd, 4/TD, -1 INT, +3 at 300+
       Rushing: 0.1/yd, 6/TD, +3 at 100+
       Receiving: 1/rec, 0.1/yd, 6/TD, +3 at 100+
       Fumbles lost: -1 each
       2PT: +2 each (pass/rush/rec)
     """
-    # Fill missing columns with 0
     needed = [
         "passing_yards", "passing_tds", "interceptions",
         "rushing_yards", "rushing_tds",
@@ -107,94 +105,113 @@ def compute_dk_points(df: pd.DataFrame) -> pd.Series:
             df[c] = 0
 
     pass_yds = pd.to_numeric(df["passing_yards"], errors="coerce").fillna(0)
-    pass_td = pd.to_numeric(df["passing_tds"], errors="coerce").fillna(0)
-    ints = pd.to_numeric(df["interceptions"], errors="coerce").fillna(0)
+    pass_td  = pd.to_numeric(df["passing_tds"], errors="coerce").fillna(0)
+    ints     = pd.to_numeric(df["interceptions"], errors="coerce").fillna(0)
 
     rush_yds = pd.to_numeric(df["rushing_yards"], errors="coerce").fillna(0)
-    rush_td = pd.to_numeric(df["rushing_tds"], errors="coerce").fillna(0)
+    rush_td  = pd.to_numeric(df["rushing_tds"], errors="coerce").fillna(0)
 
-    rec = pd.to_numeric(df["receptions"], errors="coerce").fillna(0)
-    rec_yds = pd.to_numeric(df["receiving_yards"], errors="coerce").fillna(0)
-    rec_td = pd.to_numeric(df["receiving_tds"], errors="coerce").fillna(0)
+    rec      = pd.to_numeric(df["receptions"], errors="coerce").fillna(0)
+    rec_yds  = pd.to_numeric(df["receiving_yards"], errors="coerce").fillna(0)
+    rec_td   = pd.to_numeric(df["receiving_tds"], errors="coerce").fillna(0)
 
     fum_lost = pd.to_numeric(df["fumbles_lost"], errors="coerce").fillna(0)
 
-    p2 = pd.to_numeric(df["passing_2pt_conversions"], errors="coerce").fillna(0)
-    r2 = pd.to_numeric(df["rushing_2pt_conversions"], errors="coerce").fillna(0)
+    p2  = pd.to_numeric(df["passing_2pt_conversions"], errors="coerce").fillna(0)
+    r2  = pd.to_numeric(df["rushing_2pt_conversions"], errors="coerce").fillna(0)
     rc2 = pd.to_numeric(df["receiving_2pt_conversions"], errors="coerce").fillna(0)
 
     pts = (
-        pass_yds * 0.04
-        + pass_td * 4
-        + ints * -1
-        + rush_yds * 0.10
-        + rush_td * 6
-        + rec * 1
-        + rec_yds * 0.10
-        + rec_td * 6
-        + fum_lost * -1
-        + (p2 + r2 + rc2) * 2
+        pass_yds * 0.04 +
+        pass_td  * 4.0 +
+        ints     * -1.0 +
+        rush_yds * 0.10 +
+        rush_td  * 6.0 +
+        rec      * 1.0 +
+        rec_yds  * 0.10 +
+        rec_td   * 6.0 +
+        fum_lost * -1.0 +
+        (p2 + r2 + rc2) * 2.0
     )
 
-    pts = pts + (pass_yds >= 300).astype(int) * 3
-    pts = pts + (rush_yds >= 100).astype(int) * 3
-    pts = pts + (rec_yds >= 100).astype(int) * 3
+    pts = pts + (pass_yds >= 300).astype(int) * 3.0
+    pts = pts + (rush_yds >= 100).astype(int) * 3.0
+    pts = pts + (rec_yds >= 100).astype(int) * 3.0
 
     return pts.round(1)
+
+
+def deterministic_salary(player_key: str, pos: str, seed_tag: str) -> int:
+    ranges = {
+        "QB": (5200, 8800),
+        "RB": (4000, 9200),
+        "WR": (3000, 9000),
+        "TE": (2500, 7800),
+        "DST": (2000, 4500),
+    }
+    lo, hi = ranges.get(pos, (3000, 8000))
+    h = abs(hash(f"{seed_tag}:{pos}:{player_key}")) % (10**9)
+    val = lo + (h % (hi - lo + 1))
+    return int(round(val / 100) * 100)
 
 
 # -----------------------------
 # Load weekly stats (real)
 # -----------------------------
 @st.cache_data(ttl=6 * 60 * 60)
-def get_player_stats_cached(seasons):
+def get_weekly(seasons):
     df = load_player_stats(seasons)
+
+    # Normalize key columns across datasets
+    df = ensure_column(df, "player_display_name", ["player_name", "name", "player"], default_val=None)
+    df = ensure_column(df, "season", ["year"], default_val=None)
+    df = ensure_column(df, "week", ["week_num", "game_week"], default_val=None)
+
+    # IMPORTANT: your crash is here — make these exist
+    df = ensure_column(df, "position", ["pos", "position_group"], default_val="")
+    df = ensure_column(df, "recent_team", ["team", "posteam", "team_abbr", "club"], default_val="")
+
+    # Clean types
     df = df.dropna(subset=["player_display_name", "season", "week"])
-    # Normalize column names expected downstream
-    if "recent_team" not in df.columns and "team" in df.columns:
-        df["recent_team"] = df["team"]
-    if "position" not in df.columns:
-        df["position"] = None
+    df["season"] = pd.to_numeric(df["season"], errors="coerce")
+    df["week"] = pd.to_numeric(df["week"], errors="coerce")
+    df["position"] = df["position"].astype(str).str.upper().str.strip()
+    df["recent_team"] = df["recent_team"].astype(str).str.upper().str.strip()
+
     return df
 
 
-# Sidebar season selection: last 3 seasons including 2025 if available
+# -----------------------------
+# Sidebar: Season
+# -----------------------------
 with st.sidebar:
     st.markdown("### 📅 Season")
-    seasons_available = [2025, 2024, 2023]  # keep it explicit like you asked
-    season = st.selectbox("Choose season", seasons_available, index=0)
+    season = st.selectbox("Choose season", [2025, 2024, 2023], index=0)
     st.caption("Stats pulled automatically via nfl-data-py (free).")
 
-
 try:
-    weekly = get_player_stats_cached([2023, 2024, 2025])
+    weekly_all = get_weekly([2023, 2024, 2025])
 except Exception as e:
     st.error("Could not load weekly player stats.")
     st.code(str(e))
     st.stop()
 
-weekly["season"] = pd.to_numeric(weekly["season"], errors="coerce")
-weekly["week"] = pd.to_numeric(weekly["week"], errors="coerce")
-
-weekly = weekly[weekly["season"] == int(season)].copy()
+weekly = weekly_all[weekly_all["season"] == int(season)].copy()
 if weekly.empty:
     st.warning(f"No weekly data found for season {season}.")
     st.stop()
 
-# Build DK points from raw stats (1 decimal)
+# Compute DK points
 weekly["dk_points"] = compute_dk_points(weekly)
 
-# Detect latest week available in the chosen season
 latest_week = int(pd.to_numeric(weekly["week"], errors="coerce").max())
 
+# -----------------------------
+# Sidebar: Week slider
+# -----------------------------
 with st.sidebar:
     st.markdown("### 🗓️ Week")
-    mode = st.radio(
-        "Last-3 mode",
-        ["Latest available", "Choose a week"],
-        index=0,
-        horizontal=True,
-    )
+    mode = st.radio("Last-3 mode", ["Latest available", "Choose a week"], index=0, horizontal=False)
     if mode == "Latest available":
         up_to_week = latest_week + 1
         st.caption(f"Using last-3 games prior to Week {up_to_week} (latest in data: Week {latest_week}).")
@@ -204,19 +221,19 @@ with st.sidebar:
             min_value=1,
             max_value=latest_week + 1,
             value=latest_week + 1,
-            step=1,
+            step=1
         )
 
-# Only games BEFORE up_to_week
 weekly_cut = weekly[weekly["week"] < int(up_to_week)].copy()
 if weekly_cut.empty:
     st.warning("No games found before that week. Choose a later week.")
     st.stop()
 
 # -----------------------------
-# Build player-level metrics: last 3 games played + season averages
+# Build last-3 + season average metrics
 # -----------------------------
 weekly_cut = weekly_cut.sort_values(["player_display_name", "week"], ascending=[True, False])
+
 last3 = weekly_cut.groupby("player_display_name").head(3).copy()
 last3["rank"] = last3.groupby("player_display_name").cumcount() + 1
 
@@ -224,8 +241,7 @@ def pivot_last3(col, pref):
     if col not in last3.columns:
         return None
     p = last3.pivot_table(index="player_display_name", columns="rank", values=col, aggfunc="first")
-    p = p.rename(columns={1: f"{pref}_L1", 2: f"{pref}_L2", 3: f"{pref}_L3"}).reset_index()
-    return p
+    return p.rename(columns={1: f"{pref}_L1", 2: f"{pref}_L2", 3: f"{pref}_L3"}).reset_index()
 
 metrics = pivot_last3("dk_points", "Pts")
 if metrics is None:
@@ -242,7 +258,6 @@ for col, pref in [
     if p is not None:
         metrics = metrics.merge(p, on="player_display_name", how="left")
 
-# Season average DK points (using games before up_to_week)
 season_avg = (
     weekly_cut.groupby("player_display_name")["dk_points"]
     .mean()
@@ -251,48 +266,41 @@ season_avg = (
 )
 metrics = metrics.merge(season_avg, on="player_display_name", how="left")
 
-# Attach identity (pos/team) from most recent record available in cut
+# Identity from most recent game in cut (SAFE because we forced cols above)
 identity = (
-    weekly_cut.sort_values(["player_display_name", "week"], ascending=[True, False])
+    weekly_cut
+    .sort_values(["player_display_name", "week"], ascending=[True, False])
     .drop_duplicates("player_display_name")[["player_display_name", "position", "recent_team"]]
     .rename(columns={"position": "Position", "recent_team": "Team"})
 )
 metrics = metrics.merge(identity, on="player_display_name", how="left")
 
-# Clean + fill
+# Clean + fill numeric
 for c in metrics.columns:
-    if c != "player_display_name" and c not in ["Position", "Team"]:
+    if c not in ["player_display_name", "Position", "Team"]:
         metrics[c] = pd.to_numeric(metrics[c], errors="coerce").fillna(0)
 
-metrics["Player"] = metrics["player_display_name"]
+metrics["Player"] = metrics["player_display_name"].astype(str)
 metrics["Position"] = metrics["Position"].astype(str).str.upper().str.strip()
-metrics["Team"] = metrics["Team"].fillna("")
+metrics["Team"] = metrics["Team"].fillna("").astype(str).str.upper().str.strip()
 
-# Keep only DK roster positions
+# Keep core DK roster positions
 metrics = metrics[metrics["Position"].isin(["QB", "RB", "WR", "TE"])].copy()
 
-# Deterministic demo salaries (until you plug DK salaries)
-# (No $ in the column name to avoid your prior error)
-def deterministic_salary(player_key: str, pos: str, seed_tag: str) -> int:
-    ranges = {"QB": (5200, 8800), "RB": (4000, 9200), "WR": (3000, 9000), "TE": (2500, 7800), "DST": (2000, 4500)}
-    lo, hi = ranges.get(pos, (3000, 8000))
-    # stable-ish hash
-    h = abs(hash(f"{seed_tag}:{pos}:{player_key}")) % (10**9)
-    val = lo + (h % (hi - lo + 1))
-    return int(round(val / 100) * 100)
-
+# Salaries: deterministic placeholders (until DK salary integration)
 seed_tag = f"{season}-W{up_to_week}"
 metrics["player_key"] = metrics["Player"].apply(normalize_name)
 metrics["Salary"] = metrics.apply(lambda r: deterministic_salary(r["player_key"], r["Position"], seed_tag), axis=1)
 
-# Derived metrics (1 decimal where applicable)
+# Derived metrics (1 decimal)
 metrics["Avg_Last3"] = metrics[["Pts_L1", "Pts_L2", "Pts_L3"]].mean(axis=1).round(1)
 metrics["Value_per_1k"] = (metrics["Avg_Last3"] / (metrics["Salary"] / 1000)).replace([np.inf, -np.inf], 0).fillna(0).round(1)
 metrics["Last3_Spark"] = metrics.apply(lambda r: sparkline([r["Pts_L1"], r["Pts_L2"], r["Pts_L3"]]), axis=1)
 metrics["Trend"] = metrics.apply(lambda r: trend_arrow(r["Pts_L1"], r["Pts_L2"], r["Pts_L3"]), axis=1)
 
 df = metrics[
-    ["Player", "Position", "Team", "Salary", "PPG_Season", "Pts_L1", "Pts_L2", "Pts_L3",
+    ["Player", "Position", "Team", "Salary", "PPG_Season",
+     "Pts_L1", "Pts_L2", "Pts_L3",
      "PassYds_L1", "PassYds_L2", "PassYds_L3",
      "PassTD_L1", "PassTD_L2", "PassTD_L3",
      "RushYds_L1", "RushYds_L2", "RushYds_L3",
@@ -300,6 +308,29 @@ df = metrics[
      "Rec_L1", "Rec_L2", "Rec_L3",
      "Avg_Last3", "Value_per_1k", "Last3_Spark", "Trend"]
 ].copy()
+
+# Add simple DST placeholders
+dst_pool = pd.DataFrame({
+    "Player": ["49ers DST", "Cowboys DST", "Eagles DST", "Chiefs DST"],
+    "Position": ["DST", "DST", "DST", "DST"],
+    "Team": ["SF", "DAL", "PHI", "KC"],
+    "Salary": [3200, 3500, 3300, 3400],
+    "PPG_Season": [0.0, 0.0, 0.0, 0.0],
+    "Pts_L1": [0.0, 0.0, 0.0, 0.0],
+    "Pts_L2": [0.0, 0.0, 0.0, 0.0],
+    "Pts_L3": [0.0, 0.0, 0.0, 0.0],
+    "PassYds_L1": [0.0]*4, "PassYds_L2": [0.0]*4, "PassYds_L3": [0.0]*4,
+    "PassTD_L1": [0.0]*4, "PassTD_L2": [0.0]*4, "PassTD_L3": [0.0]*4,
+    "RushYds_L1": [0.0]*4, "RushYds_L2": [0.0]*4, "RushYds_L3": [0.0]*4,
+    "RecYds_L1": [0.0]*4, "RecYds_L2": [0.0]*4, "RecYds_L3": [0.0]*4,
+    "Rec_L1": [0.0]*4, "Rec_L2": [0.0]*4, "Rec_L3": [0.0]*4,
+    "Avg_Last3": [0.0]*4,
+    "Value_per_1k": [0.0]*4,
+    "Last3_Spark": ["▁▁▁"]*4,
+    "Trend": ["→"]*4,
+})
+
+df_all = pd.concat([df, dst_pool[df.columns]], ignore_index=True)
 
 st.caption(
     f"Season {season}: data through Week {latest_week}. "
@@ -319,43 +350,20 @@ slots = [
     ("WR3", ["WR"]),
     ("TE", ["TE"]),
     ("FLEX", ["RB", "WR", "TE"]),
-    # DST kept as placeholder until you add team defense stats
     ("DST", ["DST"]),
 ]
 slot_names = [s[0] for s in slots]
 
-# Add a small DST pool (placeholder)
-dst_pool = pd.DataFrame({
-    "Player": ["49ers DST", "Cowboys DST", "Eagles DST", "Chiefs DST"],
-    "Position": ["DST", "DST", "DST", "DST"],
-    "Team": ["SF", "DAL", "PHI", "KC"],
-})
-dst_pool["Salary"] = [3200, 3500, 3300, 3400]
-dst_pool["PPG_Season"] = 0.0
-dst_pool["Pts_L1"] = dst_pool["Pts_L2"] = dst_pool["Pts_L3"] = 0.0
-dst_pool["PassYds_L1"] = dst_pool["PassYds_L2"] = dst_pool["PassYds_L3"] = 0.0
-dst_pool["PassTD_L1"] = dst_pool["PassTD_L2"] = dst_pool["PassTD_L3"] = 0.0
-dst_pool["RushYds_L1"] = dst_pool["RushYds_L2"] = dst_pool["RushYds_L3"] = 0.0
-dst_pool["RecYds_L1"] = dst_pool["RecYds_L2"] = dst_pool["RecYds_L3"] = 0.0
-dst_pool["Rec_L1"] = dst_pool["Rec_L2"] = dst_pool["Rec_L3"] = 0.0
-dst_pool["Avg_Last3"] = 0.0
-dst_pool["Value_per_1k"] = 0.0
-dst_pool["Last3_Spark"] = "▁▁▁"
-dst_pool["Trend"] = "→"
-
-df_all = pd.concat([df, dst_pool[df.columns]], ignore_index=True)
-
-# Ensure session_state keys exist
 for slot_name, _ in slots:
     st.session_state.setdefault(f"slot_{slot_name}", "—")
 
 def get_selected_players():
-    selected = []
+    out = []
     for slot_name in slot_names:
-        val = st.session_state.get(f"slot_{slot_name}", "—")
-        if val and val != "—":
-            selected.append(val)
-    return selected
+        v = st.session_state.get(f"slot_{slot_name}", "—")
+        if v and v != "—":
+            out.append(v)
+    return out
 
 # -----------------------------
 # Sidebar: Roster Builder
@@ -375,7 +383,6 @@ with st.sidebar:
             exclude.discard(current_val)
         pool_slot = pool_slot[~pool_slot["Player"].isin(exclude)]
 
-        # Dropdown label (compact but informative)
         pool_slot["Label"] = pool_slot.apply(
             lambda r: f'{r["Player"]} ({r["Team"]}) — ${int(r["Salary"]):,} — {r["Trend"]} V {r["Value_per_1k"]:.1f}',
             axis=1
@@ -399,8 +406,8 @@ with st.sidebar:
 
         st.session_state[f"slot_{slot_name}"] = label_to_player.get(picked_label, "—")
 
-    chosen_players = get_selected_players()
-    total_salary = int(df_all[df_all["Player"].isin(chosen_players)]["Salary"].sum()) if chosen_players else 0
+    chosen = get_selected_players()
+    total_salary = int(df_all[df_all["Player"].isin(chosen)]["Salary"].sum()) if chosen else 0
 
     st.markdown("---")
     st.metric("Salary Used", f"${total_salary:,}")
@@ -410,9 +417,9 @@ with st.sidebar:
         st.error("Over the $50,000 salary cap. Try swapping to lower-cost players.")
 
     if st.button("Reset Lineup"):
-        for slot_name in slot_names:
-            st.session_state[f"slot_{slot_name}"] = "—"
-            st.session_state[f"ui_{slot_name}"] = "—"
+        for sname in slot_names:
+            st.session_state[f"slot_{sname}"] = "—"
+            st.session_state[f"ui_{sname}"] = "—"
         st.rerun()
 
 # -----------------------------
@@ -460,7 +467,6 @@ if search:
     pool_df = pool_df[pool_df["Player"].str.lower().str.contains(search)]
 
 display_cols = ["Player", "Position", "Team", "Salary", "PPG_Season", "Trend", "Last3_Spark", "Avg_Last3", "Value_per_1k"]
-# Sort: by pos then value
 pool_view = pool_df[display_cols].sort_values(["Position", "Value_per_1k"], ascending=[True, False]).copy()
 
 pool_view = pool_view.rename(columns={
@@ -493,48 +499,45 @@ st.markdown(f"#### {row['Player']} ({pos}) — {row['Team']}")
 
 m1, m2, m3, m4, m5 = st.columns(5)
 m1.metric("Salary", f"${int(row['Salary']):,}")
-m2.metric("Season Avg (DK)", f"{safe_num(row['PPG_Season']):.1f}")
-m3.metric("Avg Last 3 (DK)", f"{safe_num(row['Avg_Last3']):.1f}")
-m4.metric("Value / $1k", f"{safe_num(row['Value_per_1k']):.1f}")
+m2.metric("Season Avg (DK)", f"{float(row['PPG_Season']):.1f}")
+m3.metric("Avg Last 3 (DK)", f"{float(row['Avg_Last3']):.1f}")
+m4.metric("Value / $1k", f"{float(row['Value_per_1k']):.1f}")
 m5.metric("Trend", f"{row['Trend']}")
 
-# Last 3 fantasy points
 st.markdown("**Last 3 Fantasy Points (DK calc)**")
 pts_df = pd.DataFrame({
     "Game": ["L1", "L2", "L3"],
-    "DK_Points": [safe_num(row["Pts_L1"]), safe_num(row["Pts_L2"]), safe_num(row["Pts_L3"])],
+    "DK_Points": [float(row["Pts_L1"]), float(row["Pts_L2"]), float(row["Pts_L3"])],
 })
 st.dataframe(pts_df, use_container_width=True, hide_index=True)
 st.line_chart(pts_df.set_index("Game")["DK_Points"])
 
-# Position-specific breakdown
 st.markdown("**Last 3 Stat Breakdown**")
-
 if pos == "QB":
     detail_df = pd.DataFrame({
         "Game": ["L1", "L2", "L3"],
-        "PassYds": [safe_num(row["PassYds_L1"]), safe_num(row["PassYds_L2"]), safe_num(row["PassYds_L3"])],
-        "PassTD":  [safe_num(row["PassTD_L1"]),  safe_num(row["PassTD_L2"]),  safe_num(row["PassTD_L3"])],
-        "RushYds": [safe_num(row["RushYds_L1"]), safe_num(row["RushYds_L2"]), safe_num(row["RushYds_L3"])],
-        "DK_Points": [safe_num(row["Pts_L1"]), safe_num(row["Pts_L2"]), safe_num(row["Pts_L3"])],
+        "PassYds": [float(row["PassYds_L1"]), float(row["PassYds_L2"]), float(row["PassYds_L3"])],
+        "PassTD":  [float(row["PassTD_L1"]),  float(row["PassTD_L2"]),  float(row["PassTD_L3"])],
+        "RushYds": [float(row["RushYds_L1"]), float(row["RushYds_L2"]), float(row["RushYds_L3"])],
+        "DK_Points": [float(row["Pts_L1"]), float(row["Pts_L2"]), float(row["Pts_L3"])],
     })
 elif pos in ["RB", "WR", "TE"]:
     detail_df = pd.DataFrame({
         "Game": ["L1", "L2", "L3"],
-        "RushYds": [safe_num(row["RushYds_L1"]), safe_num(row["RushYds_L2"]), safe_num(row["RushYds_L3"])],
-        "Receptions": [safe_num(row["Rec_L1"]), safe_num(row["Rec_L2"]), safe_num(row["Rec_L3"])],
-        "RecYds": [safe_num(row["RecYds_L1"]), safe_num(row["RecYds_L2"]), safe_num(row["RecYds_L3"])],
-        "DK_Points": [safe_num(row["Pts_L1"]), safe_num(row["Pts_L2"]), safe_num(row["Pts_L3"])],
+        "RushYds": [float(row["RushYds_L1"]), float(row["RushYds_L2"]), float(row["RushYds_L3"])],
+        "Receptions": [float(row["Rec_L1"]), float(row["Rec_L2"]), float(row["Rec_L3"])],
+        "RecYds": [float(row["RecYds_L1"]), float(row["RecYds_L2"]), float(row["RecYds_L3"])],
+        "DK_Points": [float(row["Pts_L1"]), float(row["Pts_L2"]), float(row["Pts_L3"])],
     })
-else:  # DST placeholder
+else:
     detail_df = pd.DataFrame({
         "Game": ["L1", "L2", "L3"],
-        "DK_Points": [safe_num(row["Pts_L1"]), safe_num(row["Pts_L2"]), safe_num(row["Pts_L3"])],
+        "DK_Points": [float(row["Pts_L1"]), float(row["Pts_L2"]), float(row["Pts_L3"])],
     })
 
 st.dataframe(detail_df, use_container_width=True, hide_index=True)
 
 st.caption(
-    "DK points are computed in-app from weekly stat columns (1 decimal). "
+    "DK points are computed in-app (1 decimal). "
     "Salaries are demo placeholders until you connect real DraftKings salaries."
 )
