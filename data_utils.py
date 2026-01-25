@@ -16,7 +16,7 @@ def load_player_stats(seasons=None):
     # Convert Polars → Pandas
     df = player_stats.to_pandas()
 
-        # Select commonly useful columns (offense + defense + penalties)
+    # Select commonly useful columns (offense + defense + penalties)
     keep_cols = [
         # core identity
         "player_display_name",
